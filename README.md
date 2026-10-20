@@ -1,4 +1,4 @@
-# jku-thesis
+# Lizard Reproduction
 
 This project turns Llama-3.2-1B into a [Lizard](https://arxiv.org/abs/2507.09025) model. Lizard replaces softmax attention with gated linear attention plus a small sliding-window attention.
 
