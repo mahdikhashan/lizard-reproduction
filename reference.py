@@ -2,7 +2,8 @@ import math
 
 import torch
 from transformers import LlamaConfig
-from transformers.models.llama.modeling_llama import repeat_kv
+from transformers.models.llama.modeling_llama import (LlamaRotaryEmbedding,
+                                                      repeat_kv)
 
 from lizard_attention import LizardAttention
 
@@ -56,9 +57,16 @@ def awa_loop(q, k, v, meta, window):
     return out
 
 
-def lizard_loop(layer, x):
+def rope_loop(x, cos, sin):
+    half = x.shape[-1] // 2
+    rotated = torch.cat([-x[..., half:], x[..., :half]], dim=-1)
+    return x * cos[:, None] + rotated * sin[:, None]
+
+
+def lizard_loop(layer, x, rope):
     p = {n: t.detach().double() for n, t in layer.named_parameters()}
     x = x.double()
+    cos, sin = (t.double() for t in rope)
     b, n, _ = x.shape
 
     def heads(name, count):
@@ -71,8 +79,9 @@ def lizard_loop(layer, x):
     gamma = 1 / (1 + torch.exp(-(x @ p["W_gamma.weight"].T))).squeeze(-1)
     fq = hedgehog_loop(q, p["phi_q.weight"])
     fk = hedgehog_loop(k, p["phi_k.weight"])
+    qr, kr = rope_loop(q, cos, sin), rope_loop(k, cos, sin)
     y = gla_loop(fq, fk, v, gamma) + p["alpha_blend"] * awa_loop(
-        q, k, v, p["meta_tokens"], layer.window)
+        qr, kr, v, p["meta_tokens"], layer.window)
     return y.transpose(1, 2).reshape(b, n, -1) @ p["o_proj.weight"].T
 
 
@@ -81,6 +90,12 @@ def tiny_config(layers=1):
                        num_hidden_layers=layers, num_attention_heads=4,
                        num_key_value_heads=2, vocab_size=100,
                        attn_implementation="eager")
+
+
+def tiny_rope(length, start=0, dtype=torch.float64):
+    x = torch.zeros(1, length, 1, dtype=dtype)
+    positions = torch.arange(start, start + length)[None]
+    return LlamaRotaryEmbedding(tiny_config())(x, positions)
 
 
 def random_layer(seed=0, dtype=torch.float64):

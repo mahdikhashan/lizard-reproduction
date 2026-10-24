@@ -26,7 +26,7 @@
   <rect class="bg" width="760" height="900"/>
 
   <text class="title" x="380" y="40">Lizard attention layer</text>
-  <text class="sub" x="380" y="62">Replaces every LlamaAttention layer · no RoPE · no KV cache</text>
+  <text class="sub" x="380" y="62">Replaces every LlamaAttention layer · RoPE in the window only · no KV cache</text>
 
   <!-- input -->
   <rect class="gray" x="290" y="86" width="180" height="40" rx="8"/>

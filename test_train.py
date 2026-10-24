@@ -77,3 +77,14 @@ def test_gradient_checkpointing_recomputes_without_changing_results(
     (calls_a, weights_a), (calls_b, weights_b) = results
     assert calls_b == 2 * calls_a
     assert all(torch.allclose(weights_a[k], weights_b[k]) for k in weights_a)
+
+
+def test_bfloat16_stages_keep_bfloat16_weights():
+    state = train.stage1(tiny_llama().to(torch.bfloat16), tiny_loader())
+    assert all(p.dtype == torch.bfloat16 for p in state.values())
+    model = train.stage2(tiny_llama().to(torch.bfloat16), state, tiny_loader())
+    saved = model.state_dict()
+    assert all(p.dtype == torch.bfloat16 and torch.isfinite(p).all()
+               for p in saved.values())
+    train.to_lizard(tiny_llama().to(torch.bfloat16)).load_state_dict(
+        saved, strict=True)

@@ -4,13 +4,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
-from transformers.models.llama.modeling_llama import (LlamaAttention,
-                                                      LlamaRotaryEmbedding)
+from transformers.models.llama.modeling_llama import LlamaAttention
 
 import lizard_attention as lz
 from reference import (awa_inputs, awa_loop, gla_inputs, gla_loop,
                        gla_recurrent, hedgehog_loop, lizard_loop,
-                       random_layer, rel_err, tiny_config)
+                       random_layer, rel_err, tiny_config, tiny_rope)
 
 EXACT = 1e-10
 
@@ -109,16 +108,35 @@ def test_gradients_match_finite_differences(fn):
 
 
 def test_layer_matches_formula_loops():
+    layer, rope = random_layer(), tiny_rope(20)
+    x = torch.randn(2, 20, 128).double()
+    assert rel_err(layer(x, rope)[0], lizard_loop(layer, x, rope)) < EXACT
+
+
+def test_window_rope_depends_only_on_relative_positions():
     layer = random_layer()
     x = torch.randn(2, 20, 128).double()
-    assert rel_err(layer(x)[0], lizard_loop(layer, x)) < EXACT
+    shifted = layer(x, tiny_rope(20, start=7))[0]
+    assert rel_err(shifted, layer(x, tiny_rope(20))[0]) < 1e-5
+
+
+def test_bfloat16_weights_stay_bfloat16_and_close_to_formula():
+    config = tiny_config()
+    llama = LlamaAttention(config, 0).to(torch.bfloat16)
+    assert all(p.dtype == torch.bfloat16
+               for p in lz.from_llama(llama, config).parameters())
+    layer = random_layer(dtype=torch.bfloat16)
+    x, rope = torch.randn(2, 20, 128).bfloat16(), tiny_rope(20)
+    y = layer(x, rope)[0]
+    assert y.dtype == torch.bfloat16
+    assert rel_err(y, lizard_loop(layer, x, rope)) < 2e-2
 
 
 def test_layer_is_causal_and_batch_independent():
-    layer = random_layer()
+    layer, rope = random_layer(), tiny_rope(30)
     x = torch.randn(3, 30, 128).double().requires_grad_()
-    y = layer(x)[0]
-    single = torch.cat([layer(x[i:i + 1])[0] for i in range(3)])
+    y = layer(x, rope)[0]
+    single = torch.cat([layer(x[i:i + 1], rope)[0] for i in range(3)])
     assert rel_err(y, single) < EXACT
     y[:, 9].sum().backward()
     assert (x.grad[:, 10:] == 0).all()
@@ -126,7 +144,7 @@ def test_layer_is_causal_and_batch_independent():
 
 def test_every_lizard_parameter_gets_a_gradient():
     layer = lz.LizardAttention(tiny_config(), 0, window=16, feature_dim=8)
-    y, _ = layer(torch.randn(2, 30, 128))
+    y, _ = layer(torch.randn(2, 30, 128), tiny_rope(30, dtype=torch.float32))
     (y * torch.randn_like(y)).sum().backward()
     for name in ("phi_q", "phi_k", "W_gamma", "meta_tokens", "alpha_blend"):
         grad = [p.grad for n, p in layer.named_parameters() if name in n][0]
@@ -152,12 +170,8 @@ def test_equals_llama_attention_in_the_softmax_limit(monkeypatch):
     config = tiny_config()
     llama = LlamaAttention(config, 0).double()
     lizard = softmax_only(lz.from_llama(llama, config), monkeypatch)
-    x = torch.randn(2, 30, 128).double()
-    no_rope = (torch.ones(2, 30, 32).double(),
-               torch.zeros(2, 30, 32).double())
-    rope = LlamaRotaryEmbedding(config)(x, torch.arange(30)[None])
-    assert rel_err(lizard(x)[0], llama_output(llama, x, no_rope)) < 1e-6
-    assert rel_err(lizard(x)[0], llama_output(llama, x, rope)) > 1e-3
+    x, rope = torch.randn(2, 30, 128).double(), tiny_rope(30)
+    assert rel_err(lizard(x, rope)[0], llama_output(llama, x, rope)) < 1e-6
 
 
 def test_whole_model_logits_unchanged_after_swap(monkeypatch):
@@ -166,11 +180,6 @@ def test_whole_model_logits_unchanged_after_swap(monkeypatch):
         model = AutoModelForCausalLM.from_pretrained(name).eval()
     else:
         model = LlamaForCausalLM(tiny_config(layers=2)).eval()
-    head_dim = model.config.hidden_size // model.config.num_attention_heads
-    monkeypatch.setattr(
-        model.model.rotary_emb, "forward",
-        lambda x, position_ids: (torch.ones(*position_ids.shape, head_dim),
-                                 torch.zeros(*position_ids.shape, head_dim)))
     ids = torch.randint(0, model.config.vocab_size, (1, 64))
     expected = model(ids).logits
     for block in model.model.layers:
