@@ -104,7 +104,7 @@ def stage1(teacher, loader):
     for i, block in enumerate(teacher.model.layers):
         def hook(module, args, kwargs, output, i=i):
             x = args[0] if args else kwargs["hidden_states"]
-            captured[i] = (x, output[0])
+            captured[i] = (x, kwargs["position_embeddings"], output[0])
         block.self_attn.register_forward_hook(hook, with_kwargs=True)
 
     def step_fn(ids):
@@ -112,8 +112,8 @@ def stage1(teacher, loader):
             teacher.model(input_ids=ids, use_cache=False)
         total = 0.0
         for i, student in enumerate(students):
-            x, target = captured[i]
-            loss = (student(x)[0] - target).pow(2).sum()
+            x, rope, target = captured[i]
+            loss = (student(x, rope)[0].float() - target.float()).pow(2).sum()
             loss = loss / len(students) / C.GRAD_ACCUM
             loss.backward()
             total += loss.item()

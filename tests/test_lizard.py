@@ -1,18 +1,131 @@
+import math
 import os
 
 import pytest
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, LlamaForCausalLM
+from transformers import AutoModelForCausalLM, LlamaConfig, LlamaForCausalLM
 from transformers.models.llama.modeling_llama import (LlamaAttention,
-                                                      LlamaRotaryEmbedding)
+                                                      LlamaRotaryEmbedding,
+                                                      repeat_kv)
 
 import lizard_attention as lz
-from reference import (awa_inputs, awa_loop, gla_inputs, gla_loop,
-                       gla_recurrent, hedgehog_loop, lizard_loop,
-                       random_layer, rel_err, tiny_config)
 
 EXACT = 1e-10
+
+
+def rel_err(a, b):
+    a, b = a.double(), b.double()
+    return ((a - b).norm() / b.norm()).item()
+
+
+def hedgehog_loop(x, weight):
+    xw = x @ weight.T
+    pos, neg = torch.exp(xw), torch.exp(-xw)
+    return torch.cat([pos / pos.sum(-1, keepdim=True),
+                      neg / neg.sum(-1, keepdim=True)], dim=-1)
+
+
+def gla_loop(fq, fk, v, gamma):
+    out = torch.zeros_like(v)
+    for i in range(fq.shape[2]):
+        num, den = 0, 0
+        for t in range(i + 1):
+            decay = gamma[:, t + 1:i + 1].prod(-1)[:, None, None]
+            w = decay * (fq[:, :, i] * fk[:, :, t]).sum(-1, keepdim=True)
+            num, den = num + w * v[:, :, t], den + w
+        out[:, :, i] = num / den
+    return out
+
+
+def gla_recurrent(fq, fk, v, gamma):
+    b, h, n, f = fq.shape
+    S = torch.zeros(b, h, f, v.shape[-1], dtype=fq.dtype)
+    z = torch.zeros(b, h, f, dtype=fq.dtype)
+    out = []
+    for i in range(n):
+        g = gamma[:, i, None, None]
+        S = g[..., None] * S + fk[:, :, i, :, None] * v[:, :, i, None, :]
+        z = g * z + fk[:, :, i]
+        num = torch.einsum("bhf,bhfd->bhd", fq[:, :, i], S)
+        out.append(num / (fq[:, :, i] * z).sum(-1, keepdim=True))
+    return torch.stack(out, dim=2)
+
+
+def awa_loop(q, k, v, meta, window):
+    out = torch.zeros_like(v)
+    for i in range(q.shape[2]):
+        s = max(0, i - window + 1)
+        scores = (q[:, :, i, None] * k[:, :, s:i + 1]).sum(-1)
+        e = torch.exp(scores / math.sqrt(q.shape[-1]))
+        num = (e[..., None] * v[:, :, s:i + 1]).sum(-2)
+        out[:, :, i] = num / (meta.exp().sum() + e.sum(-1, keepdim=True))
+    return out
+
+
+def rope_loop(x, cos, sin):
+    half = x.shape[-1] // 2
+    rotated = torch.cat([-x[..., half:], x[..., :half]], dim=-1)
+    return x * cos[:, None] + rotated * sin[:, None]
+
+
+def lizard_loop(layer, x, rope):
+    p = {n: t.detach().double() for n, t in layer.named_parameters()}
+    x = x.double()
+    cos, sin = (t.double() for t in rope)
+    b, n, _ = x.shape
+
+    def heads(name, count):
+        y = (x @ p[name].T).view(b, n, count, -1).transpose(1, 2)
+        return repeat_kv(y, layer.heads // count)
+
+    q = heads("q_proj.weight", layer.heads)
+    k = heads("k_proj.weight", layer.kv_heads)
+    v = heads("v_proj.weight", layer.kv_heads)
+    gamma = 1 / (1 + torch.exp(-(x @ p["W_gamma.weight"].T))).squeeze(-1)
+    fq = hedgehog_loop(q, p["phi_q.weight"])
+    fk = hedgehog_loop(k, p["phi_k.weight"])
+    qr, kr = rope_loop(q, cos, sin), rope_loop(k, cos, sin)
+    y = gla_loop(fq, fk, v, gamma) + p["alpha_blend"] * awa_loop(
+        qr, kr, v, p["meta_tokens"], layer.window)
+    return y.transpose(1, 2).reshape(b, n, -1) @ p["o_proj.weight"].T
+
+
+def tiny_config(layers=1):
+    return LlamaConfig(hidden_size=128, intermediate_size=256,
+                       num_hidden_layers=layers, num_attention_heads=4,
+                       num_key_value_heads=2, vocab_size=100,
+                       attn_implementation="eager")
+
+
+def tiny_rope(length, start=0, dtype=torch.float64):
+    x = torch.zeros(1, length, 1, dtype=dtype)
+    positions = torch.arange(start, start + length)[None]
+    return LlamaRotaryEmbedding(tiny_config())(x, positions)
+
+
+def random_layer(seed=0, dtype=torch.float64):
+    torch.manual_seed(seed)
+    layer = lz.LizardAttention(tiny_config(), 0, window=16, feature_dim=8)
+    with torch.no_grad():
+        for p in layer.parameters():
+            p.normal_(0, 0.3)
+    return layer.to(dtype)
+
+
+def gla_inputs(length, batch=2, heads=3, features=6, dim=5):
+    fq = torch.randn(batch, heads, length, features).softmax(-1).double()
+    fk = torch.randn(batch, heads, length, features).softmax(-1).double()
+    v = torch.randn(batch, heads, length, dim).double()
+    gamma = torch.sigmoid(2 * torch.randn(batch, length)).double()
+    return fq, fk, v, gamma
+
+
+def awa_inputs(length, batch=2, heads=3, dim=8):
+    q, k, v = (torch.randn(batch, heads, length, dim).double()
+               for _ in range(3))
+    return q, k, v, torch.randn(4).double()
+
 
 
 @pytest.fixture(autouse=True)
@@ -109,16 +222,35 @@ def test_gradients_match_finite_differences(fn):
 
 
 def test_layer_matches_formula_loops():
+    layer, rope = random_layer(), tiny_rope(20)
+    x = torch.randn(2, 20, 128).double()
+    assert rel_err(layer(x, rope)[0], lizard_loop(layer, x, rope)) < EXACT
+
+
+def test_window_rope_depends_only_on_relative_positions():
     layer = random_layer()
     x = torch.randn(2, 20, 128).double()
-    assert rel_err(layer(x)[0], lizard_loop(layer, x)) < EXACT
+    shifted = layer(x, tiny_rope(20, start=7))[0]
+    assert rel_err(shifted, layer(x, tiny_rope(20))[0]) < 1e-5
+
+
+def test_bfloat16_weights_stay_bfloat16_and_close_to_formula():
+    config = tiny_config()
+    llama = LlamaAttention(config, 0).to(torch.bfloat16)
+    assert all(p.dtype == torch.bfloat16
+               for p in lz.from_llama(llama, config).parameters())
+    layer = random_layer(dtype=torch.bfloat16)
+    x, rope = torch.randn(2, 20, 128).bfloat16(), tiny_rope(20)
+    y = layer(x, rope)[0]
+    assert y.dtype == torch.bfloat16
+    assert rel_err(y, lizard_loop(layer, x, rope)) < 2e-2
 
 
 def test_layer_is_causal_and_batch_independent():
-    layer = random_layer()
+    layer, rope = random_layer(), tiny_rope(30)
     x = torch.randn(3, 30, 128).double().requires_grad_()
-    y = layer(x)[0]
-    single = torch.cat([layer(x[i:i + 1])[0] for i in range(3)])
+    y = layer(x, rope)[0]
+    single = torch.cat([layer(x[i:i + 1], rope)[0] for i in range(3)])
     assert rel_err(y, single) < EXACT
     y[:, 9].sum().backward()
     assert (x.grad[:, 10:] == 0).all()
@@ -126,7 +258,7 @@ def test_layer_is_causal_and_batch_independent():
 
 def test_every_lizard_parameter_gets_a_gradient():
     layer = lz.LizardAttention(tiny_config(), 0, window=16, feature_dim=8)
-    y, _ = layer(torch.randn(2, 30, 128))
+    y, _ = layer(torch.randn(2, 30, 128), tiny_rope(30, dtype=torch.float32))
     (y * torch.randn_like(y)).sum().backward()
     for name in ("phi_q", "phi_k", "W_gamma", "meta_tokens", "alpha_blend"):
         grad = [p.grad for n, p in layer.named_parameters() if name in n][0]
@@ -152,12 +284,8 @@ def test_equals_llama_attention_in_the_softmax_limit(monkeypatch):
     config = tiny_config()
     llama = LlamaAttention(config, 0).double()
     lizard = softmax_only(lz.from_llama(llama, config), monkeypatch)
-    x = torch.randn(2, 30, 128).double()
-    no_rope = (torch.ones(2, 30, 32).double(),
-               torch.zeros(2, 30, 32).double())
-    rope = LlamaRotaryEmbedding(config)(x, torch.arange(30)[None])
-    assert rel_err(lizard(x)[0], llama_output(llama, x, no_rope)) < 1e-6
-    assert rel_err(lizard(x)[0], llama_output(llama, x, rope)) > 1e-3
+    x, rope = torch.randn(2, 30, 128).double(), tiny_rope(30)
+    assert rel_err(lizard(x, rope)[0], llama_output(llama, x, rope)) < 1e-6
 
 
 def test_whole_model_logits_unchanged_after_swap(monkeypatch):
@@ -166,11 +294,6 @@ def test_whole_model_logits_unchanged_after_swap(monkeypatch):
         model = AutoModelForCausalLM.from_pretrained(name).eval()
     else:
         model = LlamaForCausalLM(tiny_config(layers=2)).eval()
-    head_dim = model.config.hidden_size // model.config.num_attention_heads
-    monkeypatch.setattr(
-        model.model.rotary_emb, "forward",
-        lambda x, position_ids: (torch.ones(*position_ids.shape, head_dim),
-                                 torch.zeros(*position_ids.shape, head_dim)))
     ids = torch.randint(0, model.config.vocab_size, (1, 64))
     expected = model(ids).logits
     for block in model.model.layers:

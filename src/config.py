@@ -6,7 +6,7 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B"
 DATASET_NAME = "yahma/alpaca-cleaned"
 NUM_EXAMPLES = 50_000
 SEQ_LEN = 2048
-DTYPE = torch.float32
+DTYPE = torch.bfloat16
 DEVICE = "cuda"
 SEED = 42
 

@@ -2,6 +2,7 @@ import math
 
 import torch
 import torch.nn as nn
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 
 def hedgehog(x, weight):
@@ -25,14 +26,21 @@ def gate_products(gamma):
 
 def gla(fq, fk, v, gamma):
     w = (fq @ fk.transpose(-1, -2)) * gate_products(gamma)[:, None]
-    return (w @ v) / w.sum(-1, keepdim=True).clamp_min(1e-6)
+    tiny = torch.finfo(w.dtype).tiny
+    return (w @ v) / w.sum(-1, keepdim=True).clamp_min(tiny)
+
+
+def sink_softmax(scores, meta):
+    m = torch.maximum(scores.amax(-1, keepdim=True), meta.max()).detach()
+    e = (scores - m).exp()
+    sinks = (meta - m).exp().sum(-1, keepdim=True)
+    return e / (sinks + e.sum(-1, keepdim=True))
 
 
 def awa(q, k, v, meta, window):
     mask = window_mask(q.shape[-2], window, q.device)
     scores = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
-    e = scores.masked_fill(~mask, float("-inf")).exp()
-    return (e @ v) / (meta.exp().sum() + e.sum(-1, keepdim=True))
+    return sink_softmax(scores.masked_fill(~mask, float("-inf")), meta) @ v
 
 
 class LizardAttention(nn.Module):
@@ -64,17 +72,20 @@ class LizardAttention(nn.Module):
         x = x.view(b, n, heads, self.head_dim).transpose(1, 2)
         return x.repeat_interleave(self.heads // heads, dim=1)
 
-    def forward(self, hidden_states, **kwargs):
+    def forward(self, hidden_states, position_embeddings, **kwargs):
         x = hidden_states
-        q = self.split(self.q_proj(x), self.heads)
-        k = self.split(self.k_proj(x), self.kv_heads)
-        v = self.split(self.v_proj(x), self.kv_heads)
-        gamma = torch.sigmoid(self.W_gamma(x)).squeeze(-1)
-        fq = hedgehog(q, self.phi_q.weight)
-        fk = hedgehog(k, self.phi_k.weight)
-        y = gla(fq, fk, v, gamma)
-        y = y + self.alpha_blend * awa(q, k, v, self.meta_tokens, self.window)
-        return self.o_proj(y.transpose(1, 2).flatten(2)), None
+        dtype = torch.promote_types(x.dtype, torch.float32)
+        q = self.split(self.q_proj(x), self.heads).to(dtype)
+        k = self.split(self.k_proj(x), self.kv_heads).to(dtype)
+        v = self.split(self.v_proj(x), self.kv_heads).to(dtype)
+        gamma = torch.sigmoid(self.W_gamma(x).to(dtype)).squeeze(-1)
+        fq = hedgehog(q, self.phi_q.weight.to(dtype))
+        fk = hedgehog(k, self.phi_k.weight.to(dtype))
+        cos, sin = (t.to(dtype) for t in position_embeddings)
+        qr, kr = apply_rotary_pos_emb(q, k, cos, sin)
+        y = gla(fq, fk, v, gamma) + self.alpha_blend.to(dtype) * awa(
+            qr, kr, v, self.meta_tokens.to(dtype), self.window)
+        return self.o_proj(y.to(x.dtype).transpose(1, 2).flatten(2)), None
 
 
 def from_llama(attention, config, **options):

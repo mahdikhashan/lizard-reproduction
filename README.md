@@ -1,91 +1,34 @@
-# Lizard Reproduction
+Lizard Reproduction
+---
 
-This project turns Llama-3.2-1B into a [Lizard](https://arxiv.org/abs/2507.09025) model. Lizard replaces softmax attention with gated linear attention plus a small sliding-window attention.
+Turns Llama-3.2-1B into a [Lizard](https://arxiv.org/abs/2507.09025) model: gated linear attention plus a sliding-window softmax attention with sink tokens and RoPE in the window. Training is a two-stage distillation from the original model. The weights stay in bfloat16.
 
-## Setup
+### Setup
 
-Create and turn on the conda environment:
-
-```bash
-conda env create -f envs/distill_lizard_llama_3_2_1B.yaml
-```
+Create and activate the conda environment:
 
 ```bash
+make env
 conda activate distill_lizard_llama_3_2_1B
 ```
 
-Llama-3.2-1B needs access on Hugging Face. Ask for access on the model page, then log in:
+Llama-3.2-1B needs access on Hugging Face (`hf auth login`). Training logs to wandb (`wandb login`). To run without wandb, set `WANDB_MODE=disabled`.
+
+### Usage
 
 ```bash
-hf auth login
+make test            # tests on CPU with a tiny model
+make train           # stage 1 and stage 2, needs a GPU, saves to checkpoints/
+make evaluate        # lm-eval on the trained Lizard model
+make evaluate-llama  # lm-eval on the original model
+make push            # upload checkpoints and code to Hugging Face
 ```
 
-Training logs to wandb. Get your key from [wandb.ai/authorize](https://wandb.ai/authorize) and log in:
+All settings are in `src/config.py`.
 
-```bash
-wandb login
-```
+#### Layout
 
-To run without wandb, put `WANDB_MODE=disabled` before the command.
-
-## Test
-
-The tests run on a normal CPU.
-
-```bash
-pip install pytest
-```
-
-```bash
-pytest
-```
-
-To run one test: `pytest test_lizard.py::test_gla_matches_formula_loops`
-
-## Train
-
-Needs a GPU. Settings are in `config.py`. The model is saved in `checkpoints/`.
-
-```bash
-python train.py
-```
-
-## Evaluate
-
-Tests the trained model on common benchmarks. Add `llama` to test the original model instead.
-
-```bash
-python evaluate.py
-```
-
-## Generate
-
-Prints answers from the original model and the trained model. Add `llama` or `lizard` to run only one.
-
-```bash
-python generate.py
-```
-
-## Benchmark
-
-Compares our attention code with other libraries for accuracy and speed.
-
-```bash
-python benchmark.py
-```
-
-## Kernels
-
-The `kernels/` folder has Triton experiments with their own environment:
-
-```bash
-conda env create -f envs/gla_kernel_benchmark.yaml
-```
-
-```bash
-conda activate gla-bench
-```
-
-```bash
-python kernels/gla_triton_flash.py --check
-```
+- `src/lizard_attention.py`: the Lizard attention layer
+- `src/train.py`: stage 1 and stage 2 training
+- `src/evaluate.py`: lm-eval benchmarks
+- `tests/test_lizard.py`: tests against slow loop versions of each formula

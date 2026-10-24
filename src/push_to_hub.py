@@ -8,7 +8,8 @@ import config as C
 STAGES = {
     "stage1": [C.STAGE1_CKPT],
     "stage2": [C.STAGE2_CKPT],
-    "code": ["config.py", "lizard_attention.py", "train.py", "evaluate.py"],
+    "code": ["src/config.py", "src/lizard_attention.py", "src/train.py",
+             "src/evaluate.py"],
 }
 
 
