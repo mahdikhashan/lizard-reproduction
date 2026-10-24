@@ -18,6 +18,7 @@ Llama-3.2-1B needs access on Hugging Face (`hf auth login`). Training logs to wa
 
 ```bash
 make test            # tests on CPU with a tiny model
+make check           # check Hugging Face and wandb access (make train runs it first)
 make train           # stage 1 and stage 2, needs a GPU, saves and uploads each stage
 make train STAGE=stage1  # only stage 1 (STAGE=stage2 for only stage 2)
 make evaluate        # paper metrics (Table 9) for the trained Lizard model
@@ -32,6 +33,15 @@ Every command uses `CONFIG=configs/lizard-1b.yaml` by default. Pass another conf
 
 Each experiment is one YAML file in `configs/`. To add one, copy `configs/lizard-1b.yaml`, give it a new name and change the values. `src/config.py` loads a file into a typed `Config` dataclass, with the attention shape in a nested `Lizard` dataclass. A missing or unknown key is an error. Without make: `python src/train.py configs/<name>.yaml [stage1|stage2|both]`.
 
+#### Checks before training
+
+`make train` first runs `make check` (`src/check.py`), and stops if one check fails. The checks are:
+
+- a Hugging Face login;
+- read access to `model_name` (Llama is gated) and to `dataset_name`;
+- write access to `hf_repo`, which is created as a private repo if it does not exist;
+- a wandb login. This check is skipped when `WANDB_MODE` is `disabled` or `offline`.
+
 #### Checkpoints
 
 Each run gets the name of its config file and the start time, for example `lizard-1b-20261024-203343`. At the start, `src/train.py` saves a copy of the config as `<run>.yaml`. After each stage, it saves `<run>-stage1.pt` and `<run>-stage2.pt`. It uploads all three files to the private Hugging Face repo `hf_repo` and keeps them in `out_dir`. The wandb run has the same name. `STAGE=stage2` trains only stage 2 from the stage 1 checkpoint in `stage1_ckpt`. `make evaluate` loads the newest `<config name>-*-stage2.pt` in `out_dir`.
@@ -45,8 +55,10 @@ Each run gets the name of its config file and the start time, for example `lizar
 - `configs/`: one YAML file for each experiment
 - `src/config.py`: the `Config` dataclass and its YAML loader
 - `src/lizard_attention.py`: the Lizard attention layer
+- `src/check.py`: checks of Hugging Face and wandb before training
 - `src/train.py`: stage 1 and stage 2 training
 - `src/evaluate.py`: lm-eval benchmarks of the paper
 - `tests/test_lizard.py`: tests against slow loop versions of each formula
 - `tests/test_evaluate.py`: tests of the scoring rules
 - `tests/test_config.py`: tests of the config loader
+- `tests/test_check.py`: tests of the checks before training
