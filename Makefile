@@ -1,4 +1,5 @@
 PYTHON ?= python
+STAGE ?= both
 
 .PHONY: env test train evaluate evaluate-llama push
 
@@ -9,7 +10,7 @@ test:
 	PYTHONPATH=src $(PYTHON) -m pytest tests
 
 train:
-	$(PYTHON) src/train.py
+	$(PYTHON) src/train.py $(STAGE)
 
 evaluate:
 	$(PYTHON) src/evaluate.py lizard
