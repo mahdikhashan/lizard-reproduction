@@ -1,4 +1,4 @@
-import sys
+import argparse
 from pathlib import Path
 
 from huggingface_hub import HfApi
@@ -19,6 +19,10 @@ def upload(path, repo_id):
 
 
 if __name__ == "__main__":
-    cfg = config.load(sys.argv[1])
-    for path in sys.argv[2:] or CODE + [cfg.path]:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config")
+    parser.add_argument("files", nargs="*")
+    args = parser.parse_args()
+    cfg = config.load(args.config)
+    for path in args.files or CODE + [cfg.path]:
         upload(path, cfg.hf_repo)

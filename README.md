@@ -31,7 +31,7 @@ Every command uses `CONFIG=configs/lizard-1b.yaml` by default. Pass another conf
 
 #### Configs
 
-Each experiment is one YAML file in `configs/`. To add one, copy `configs/lizard-1b.yaml`, give it a new name and change the values. `src/config.py` loads a file into a typed `Config` dataclass, with the attention shape in a nested `Lizard` dataclass. A missing or unknown key is an error. Without make: `python src/train.py configs/<name>.yaml [stage1|stage2|both]`.
+Each experiment is one YAML file in `configs/`. To add one, copy `configs/lizard-1b.yaml`, give it a new name and change the values. `src/config.py` loads a file into a typed `Config` dataclass, with the attention shape in a nested `Lizard` dataclass. A missing or unknown key is an error. Without make: `python src/train.py configs/<name>.yaml --stage stage1`. Each script prints its arguments with `--help`.
 
 #### Checks before training
 
@@ -48,7 +48,7 @@ Each run gets the name of its config file and the start time, for example `lizar
 
 #### Evaluation
 
-`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>.json`. Set `eval_limit` in the config for a quick run on a few questions per task. `make mmlu-fast` runs only MMLU 5-shot on the first 5 test questions of each of the 57 subjects (285 questions), as `./eval.sh --limit 5` in lolcats, and saves `<config name>-eval-<model>-mmlu-fast.json`.
+`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>-all.json`. Set `eval_limit` in the config for a quick run on a few questions per task. `make mmlu-fast` runs only MMLU 5-shot on the first 5 test questions of each of the 57 subjects (285 questions), as `./eval.sh --limit 5` in lolcats, and saves `<config name>-eval-<model>-mmlu-fast.json`.
 
 #### Layout
 
