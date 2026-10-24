@@ -6,7 +6,7 @@ from lm_eval import simple_evaluate
 from lm_eval.models.huggingface import HFLM
 from transformers import AutoTokenizer
 
-import config as C
+import config
 from train import load_llama, to_lizard
 
 ZERO_SHOT = {"piqa": "acc", "arc_easy": "acc", "arc_challenge": "acc_norm",
@@ -21,13 +21,13 @@ PAPER = {
 }
 
 
-def load(which):
-    model = load_llama()
+def load(cfg, which):
+    model = load_llama(cfg)
     if which == "lizard":
-        path = max(C.OUT_DIR.glob("*-stage2.pt"),
+        path = max(cfg.out_dir.glob(f"{cfg.name}-*-stage2.pt"),
                    key=lambda p: p.stat().st_mtime)
         state = torch.load(path, map_location="cpu")
-        to_lizard(model).load_state_dict(state, strict=True)
+        to_lizard(model, cfg).load_state_dict(state, strict=True)
     return model.eval()
 
 
@@ -41,14 +41,14 @@ def summarize(results, subjects):
     return scores
 
 
-def main(which):
-    tokenizer = AutoTokenizer.from_pretrained(C.MODEL_NAME)
-    lm = HFLM(pretrained=load(which), tokenizer=tokenizer,
-              batch_size=C.EVAL_BATCH_SIZE, add_bos_token=False)
+def main(cfg, which):
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+    lm = HFLM(pretrained=load(cfg, which), tokenizer=tokenizer,
+              batch_size=cfg.eval_batch_size, add_bos_token=False)
     zero = simple_evaluate(model=lm, tasks=list(ZERO_SHOT), num_fewshot=0,
-                           limit=C.EVAL_LIMIT)
+                           limit=cfg.eval_limit)
     mmlu = simple_evaluate(model=lm, tasks=["mmlu"], num_fewshot=5,
-                           limit=C.EVAL_LIMIT)
+                           limit=cfg.eval_limit)
     results = {**zero["results"], **mmlu["results"]}
     scores = summarize(results, [t for t in mmlu["configs"]
                                  if t.startswith("mmlu_")])
@@ -56,11 +56,12 @@ def main(which):
     for task, value in scores.items():
         print(f"{task:<15}{value:>8.1f}{PAPER['lizard'][task]:>8.1f}"
               f"{PAPER['llama'][task]:>9.1f}")
-    C.OUT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(C.OUT_DIR / f"eval_{which}.json", "w") as f:
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    with open(cfg.out_dir / f"{cfg.name}-eval-{which}.json", "w") as f:
         json.dump({"scores": scores, "results": results}, f, indent=2,
                   default=str)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "lizard")
+    which = sys.argv[2] if len(sys.argv) > 2 else "lizard"
+    main(config.load(sys.argv[1]), which)

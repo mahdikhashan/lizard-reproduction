@@ -22,23 +22,30 @@ make train           # stage 1 and stage 2, needs a GPU, saves and uploads each 
 make train STAGE=stage1  # only stage 1 (STAGE=stage2 for only stage 2)
 make evaluate        # paper metrics (Table 9) for the trained Lizard model
 make evaluate-llama  # the same metrics for the original model
-make push            # upload the code to Hugging Face
+make push            # upload the code and the config to Hugging Face
 ```
 
-All settings are in `src/config.py`.
+Every command uses `CONFIG=configs/lizard-1b.yaml` by default. Pass another config with `make train CONFIG=configs/<name>.yaml`.
+
+#### Configs
+
+Each experiment is one YAML file in `configs/`. To add one, copy `configs/lizard-1b.yaml`, give it a new name and change the values. `src/config.py` loads a file into a typed `Config` dataclass, with the attention shape in a nested `Lizard` dataclass. A missing or unknown key is an error. Without make: `python src/train.py configs/<name>.yaml [stage1|stage2|both]`.
 
 #### Checkpoints
 
-Each run gets a name from the Lizard config, the dtype and the start time, for example `lizard-window128-num_meta4-feature_dim128-bfloat16-20261024-203343`. After each stage, `src/train.py` saves `checkpoints/<run>-stage1.pt` and `checkpoints/<run>-stage2.pt` and uploads them to the private Hugging Face repo `HF_REPO`. The wandb run has the same name. `STAGE=stage2` trains only stage 2 from the stage 1 checkpoint in `STAGE1_CKPT`. Without make: `python src/train.py stage1|stage2|both`. `make evaluate` loads the newest `*-stage2.pt` in `checkpoints/`.
+Each run gets the name of its config file and the start time, for example `lizard-1b-20261024-203343`. At the start, `src/train.py` saves a copy of the config as `<run>.yaml`. After each stage, it saves `<run>-stage1.pt` and `<run>-stage2.pt`. It uploads all three files to the private Hugging Face repo `hf_repo` and keeps them in `out_dir`. The wandb run has the same name. `STAGE=stage2` trains only stage 2 from the stage 1 checkpoint in `stage1_ckpt`. `make evaluate` loads the newest `<config name>-*-stage2.pt` in `out_dir`.
 
 #### Evaluation
 
-`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `checkpoints/eval_<model>.json`. Set `EVAL_LIMIT` in `src/config.py` for a quick run on a few questions per task.
+`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>.json`. Set `eval_limit` in the config for a quick run on a few questions per task.
 
 #### Layout
 
+- `configs/`: one YAML file for each experiment
+- `src/config.py`: the `Config` dataclass and its YAML loader
 - `src/lizard_attention.py`: the Lizard attention layer
 - `src/train.py`: stage 1 and stage 2 training
 - `src/evaluate.py`: lm-eval benchmarks of the paper
 - `tests/test_lizard.py`: tests against slow loop versions of each formula
 - `tests/test_evaluate.py`: tests of the scoring rules
+- `tests/test_config.py`: tests of the config loader

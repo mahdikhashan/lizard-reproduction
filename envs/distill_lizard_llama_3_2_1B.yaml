@@ -16,4 +16,5 @@ dependencies:
       - peft
       - wandb
       - huggingface_hub
+      - pyyaml
       - lm-eval[hf]

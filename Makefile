@@ -1,4 +1,5 @@
 PYTHON ?= python
+CONFIG ?= configs/lizard-1b.yaml
 STAGE ?= both
 
 .PHONY: env test train evaluate evaluate-llama push
@@ -10,13 +11,13 @@ test:
 	PYTHONPATH=src $(PYTHON) -m pytest tests
 
 train:
-	$(PYTHON) src/train.py $(STAGE)
+	$(PYTHON) src/train.py $(CONFIG) $(STAGE)
 
 evaluate:
-	$(PYTHON) src/evaluate.py lizard
+	$(PYTHON) src/evaluate.py $(CONFIG) lizard
 
 evaluate-llama:
-	$(PYTHON) src/evaluate.py llama
+	$(PYTHON) src/evaluate.py $(CONFIG) llama
 
 push:
-	$(PYTHON) src/push_to_hub.py
+	$(PYTHON) src/push_to_hub.py $(CONFIG)

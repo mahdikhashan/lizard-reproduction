@@ -1,6 +1,8 @@
 import math
+import shutil
 import sys
 import time
+from dataclasses import asdict
 
 import torch
 import wandb
@@ -9,23 +11,25 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-import config as C
+import config
 from lizard_attention import from_llama
 from push_to_hub import upload
 
 
 def is_lizard(name):
-    return any(key in name.split(".") for key in C.LIZARD_PARAMS)
+    return any(key in name.split(".") for key in config.LIZARD_PARAMS)
 
 
-def load_llama():
-    model = AutoModelForCausalLM.from_pretrained(C.MODEL_NAME, dtype=C.DTYPE)
-    return model.to(C.DEVICE)
+def load_llama(cfg):
+    model = AutoModelForCausalLM.from_pretrained(cfg.model_name,
+                                                 dtype=cfg.torch_dtype)
+    return model.to(cfg.device)
 
 
-def to_lizard(model):
+def to_lizard(model, cfg):
     for block in model.model.layers:
-        block.self_attn = from_llama(block.self_attn, model.config, **C.LIZARD)
+        block.self_attn = from_llama(block.self_attn, model.config,
+                                     **asdict(cfg.lizard))
     return model
 
 
@@ -43,23 +47,23 @@ def pack(token_lists, length):
     return torch.tensor(ids[:n * length]).view(n, length)
 
 
-def make_loader(tokenizer):
-    data = load_dataset(C.DATASET_NAME, split="train")
-    data = data.shuffle(seed=C.SEED).select(range(C.NUM_EXAMPLES))
+def make_loader(tokenizer, cfg):
+    data = load_dataset(cfg.dataset_name, split="train")
+    data = data.shuffle(seed=cfg.seed).select(range(cfg.num_examples))
     tokens = tokenizer([format_example(e) for e in data])["input_ids"]
-    chunks = pack([t + [tokenizer.eos_token_id] for t in tokens], C.SEQ_LEN)
-    return DataLoader(chunks, batch_size=C.MICRO_BATCH, shuffle=True,
+    chunks = pack([t + [tokenizer.eos_token_id] for t in tokens], cfg.seq_len)
+    return DataLoader(chunks, batch_size=cfg.micro_batch, shuffle=True,
                       drop_last=True,
-                      generator=torch.Generator().manual_seed(C.SEED))
+                      generator=torch.Generator().manual_seed(cfg.seed))
 
 
-def lr_factor(step, total):
-    warmup = max(1, int(C.WARMUP_RATIO * total))
+def lr_factor(step, total, cfg):
+    warmup = max(1, int(cfg.warmup_ratio * total))
     if step < warmup:
         return step / warmup
     progress = min(1.0, (step - warmup) / max(1, total - warmup))
     cosine = 0.5 * (1 + math.cos(math.pi * progress))
-    return C.MIN_LR_RATIO + (1 - C.MIN_LR_RATIO) * cosine
+    return cfg.min_lr_ratio + (1 - cfg.min_lr_ratio) * cosine
 
 
 def log(stage, loss, named):
@@ -72,20 +76,20 @@ def log(stage, loss, named):
         wandb.log({f"{stage}/{k}": v for k, v in values.items()})
 
 
-def train(named, step_fn, loader, lr, stage):
+def train(named, step_fn, loader, lr, stage, cfg):
     params = [p for _, p in named]
-    total = C.EPOCHS * (len(loader) // C.GRAD_ACCUM)
-    optimizer = torch.optim.AdamW(params, lr=lr, betas=C.BETAS, eps=C.EPS,
-                                  weight_decay=C.WEIGHT_DECAY)
+    total = cfg.epochs * (len(loader) // cfg.grad_accum)
+    optimizer = torch.optim.AdamW(params, lr=lr, betas=cfg.betas,
+                                  eps=cfg.eps, weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lambda step: lr_factor(step, total))
-    for _ in range(C.EPOCHS):
+        optimizer, lambda step: lr_factor(step, total, cfg))
+    for _ in range(cfg.epochs):
         optimizer.zero_grad()
         loss = 0.0
         for i, batch in enumerate(loader):
-            loss += step_fn(batch.to(C.DEVICE))
-            if (i + 1) % C.GRAD_ACCUM == 0:
-                norm = torch.nn.utils.clip_grad_norm_(params, C.GRAD_CLIP)
+            loss += step_fn(batch.to(cfg.device))
+            if (i + 1) % cfg.grad_accum == 0:
+                norm = torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
                 if torch.isfinite(norm):
                     optimizer.step()
                 else:
@@ -96,9 +100,10 @@ def train(named, step_fn, loader, lr, stage):
                 loss = 0.0
 
 
-def stage1(teacher, loader):
+def stage1(teacher, loader, cfg):
     teacher.eval().requires_grad_(False)
-    students = [from_llama(block.self_attn, teacher.config, **C.LIZARD)
+    students = [from_llama(block.self_attn, teacher.config,
+                           **asdict(cfg.lizard))
                 for block in teacher.model.layers]
     for student in students:
         for name, p in student.named_parameters():
@@ -117,28 +122,28 @@ def stage1(teacher, loader):
         for i, student in enumerate(students):
             x, rope, target = captured[i]
             loss = (student(x, rope)[0].float() - target.float()).pow(2).sum()
-            loss = loss / len(students) / C.GRAD_ACCUM
+            loss = loss / len(students) / cfg.grad_accum
             loss.backward()
             total += loss.item()
         return total
 
     named = [(n, p) for s in students for n, p in s.named_parameters()
              if p.requires_grad]
-    train(named, step_fn, loader, C.STAGE1_LR, "stage1")
+    train(named, step_fn, loader, cfg.stage1_lr, "stage1", cfg)
     return {f"model.layers.{i}.self_attn.{n}": p.detach().cpu()
             for i, s in enumerate(students)
             for n, p in s.named_parameters() if is_lizard(n)}
 
 
-def stage2(model, lizard_state, loader):
-    model = to_lizard(model)
+def stage2(model, lizard_state, loader, cfg):
+    model = to_lizard(model, cfg)
     _, unexpected = model.load_state_dict(lizard_state, strict=False)
     assert not unexpected, unexpected
-    if C.GRADIENT_CHECKPOINTING:
+    if cfg.gradient_checkpointing:
         model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False})
-    lora = LoraConfig(r=C.LORA_RANK, lora_alpha=C.LORA_ALPHA,
-                      lora_dropout=0.0, target_modules=C.LORA_TARGETS,
+    lora = LoraConfig(r=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
+                      lora_dropout=0.0, target_modules=list(cfg.lora_targets),
                       task_type="CAUSAL_LM")
     model = get_peft_model(model, lora).train()
     for name, p in model.named_parameters():
@@ -147,45 +152,42 @@ def stage2(model, lizard_state, loader):
 
     def step_fn(ids):
         out = model(input_ids=ids, labels=ids, use_cache=False)
-        loss = out.loss / C.GRAD_ACCUM
+        loss = out.loss / cfg.grad_accum
         loss.backward()
         return loss.item()
 
     named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
-    train(named, step_fn, loader, C.STAGE2_LR, "stage2")
+    train(named, step_fn, loader, cfg.stage2_lr, "stage2", cfg)
     return model.merge_and_unload()
 
 
-def run_name():
-    lizard = "-".join(f"{key}{value}" for key, value in C.LIZARD.items())
-    dtype = str(C.DTYPE).removeprefix("torch.")
-    return f"lizard-{lizard}-{dtype}-{time.strftime('%Y%m%d-%H%M%S')}"
-
-
-def save(state, name):
-    path = C.OUT_DIR / name
+def save(state, path, cfg):
     torch.save(state, path)
-    upload(path)
+    upload(path, cfg.hf_repo)
 
 
-def main(stage):
+def main(cfg, stage):
     assert stage in ("stage1", "stage2", "both"), stage
-    assert stage != "stage2" or C.STAGE1_CKPT, "set STAGE1_CKPT for stage2"
-    torch.manual_seed(C.SEED)
-    C.OUT_DIR.mkdir(parents=True, exist_ok=True)
-    run = run_name()
-    wandb.init(project=C.WANDB_PROJECT, name=run)
-    loader = make_loader(AutoTokenizer.from_pretrained(C.MODEL_NAME))
+    assert stage != "stage2" or cfg.stage1_ckpt, "set stage1_ckpt for stage2"
+    torch.manual_seed(cfg.seed)
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    run = f"{cfg.name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    shutil.copy(cfg.path, cfg.out_dir / f"{run}.yaml")
+    upload(cfg.out_dir / f"{run}.yaml", cfg.hf_repo)
+    wandb.init(project=cfg.wandb_project, name=run)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+    loader = make_loader(tokenizer, cfg)
     if stage == "stage2":
-        lizard_state = torch.load(C.STAGE1_CKPT)
+        lizard_state = torch.load(cfg.stage1_ckpt)
     else:
-        lizard_state = stage1(load_llama(), loader)
-        save(lizard_state, f"{run}-stage1.pt")
+        lizard_state = stage1(load_llama(cfg), loader, cfg)
+        save(lizard_state, cfg.out_dir / f"{run}-stage1.pt", cfg)
     if stage != "stage1":
-        model = stage2(load_llama(), lizard_state, loader)
-        save(model.state_dict(), f"{run}-stage2.pt")
+        model = stage2(load_llama(cfg), lizard_state, loader, cfg)
+        save(model.state_dict(), cfg.out_dir / f"{run}-stage2.pt", cfg)
     wandb.finish()
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "both")
+    stage = sys.argv[2] if len(sys.argv) > 2 else "both"
+    main(config.load(sys.argv[1]), stage)
