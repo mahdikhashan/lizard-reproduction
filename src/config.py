@@ -31,8 +31,7 @@ LORA_TARGETS = ["q_proj", "k_proj", "v_proj"]
 GRADIENT_CHECKPOINTING = True
 
 OUT_DIR = Path("checkpoints")
-STAGE1_CKPT = OUT_DIR / "stage1_lizard.pt"
-STAGE2_CKPT = OUT_DIR / "stage2_model.pt"
+STAGE1_CKPT = None
 WANDB_PROJECT = "lizard-1b"
 
 EVAL_BATCH_SIZE = 8
