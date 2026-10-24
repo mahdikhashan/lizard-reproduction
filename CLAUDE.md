@@ -26,7 +26,7 @@ make mmlu-fast           # MMLU 5-shot, 5 questions per subject (285); MODEL=lla
 make push                # upload src/ and the config to the Hugging Face repo in config
 ```
 
-Run everything from the repo root: `out_dir` (default `checkpoints/`) is relative to the working directory. All hyperparameters and paths live in a YAML file in `configs/`, one file per experiment. Each script takes the config path first, then one positional choice: `python src/train.py <config> [stage1|stage2|both]`, `python src/evaluate.py <config> [lizard|llama] [all|mmlu-fast]`, `python src/push_to_hub.py <config> [files...]`.
+Run everything from the repo root: `out_dir` (default `checkpoints/`) is relative to the working directory. All hyperparameters and paths live in a YAML file in `configs/`, one file per experiment. Every script parses its arguments with `argparse`: the config path is positional, choices are options with `choices=` (so argparse rejects bad values): `python src/train.py <config> [--stage stage1|stage2|both]`, `python src/evaluate.py <config> [--model lizard|llama] [--tasks all|mmlu-fast]`, `python src/push_to_hub.py <config> [files ...]`, `python src/check.py <config>`. `main` functions take plain values, so tests call them directly.
 
 ## Config
 

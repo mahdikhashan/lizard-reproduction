@@ -1,5 +1,5 @@
+import argparse
 import json
-import sys
 
 import torch
 from lm_eval import simple_evaluate
@@ -54,7 +54,6 @@ def run_mmlu(lm, limit):
 
 
 def main(cfg, which, tasks):
-    assert tasks in ("all", "mmlu-fast"), tasks
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     lm = HFLM(pretrained=load(cfg, which), tokenizer=tokenizer,
               batch_size=cfg.eval_batch_size, add_bos_token=False)
@@ -79,6 +78,11 @@ def main(cfg, which, tasks):
 
 
 if __name__ == "__main__":
-    which = sys.argv[2] if len(sys.argv) > 2 else "lizard"
-    tasks = sys.argv[3] if len(sys.argv) > 3 else "all"
-    main(config.load(sys.argv[1]), which, tasks)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config")
+    parser.add_argument("--model", choices=["lizard", "llama"],
+                        default="lizard")
+    parser.add_argument("--tasks", choices=["all", "mmlu-fast"],
+                        default="all")
+    args = parser.parse_args()
+    main(config.load(args.config), args.model, args.tasks)

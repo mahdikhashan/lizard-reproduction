@@ -1,6 +1,6 @@
+import argparse
 import math
 import shutil
-import sys
 import time
 from dataclasses import asdict
 
@@ -167,7 +167,6 @@ def save(state, path, cfg):
 
 
 def main(cfg, stage):
-    assert stage in ("stage1", "stage2", "both"), stage
     assert stage != "stage2" or cfg.stage1_ckpt, "set stage1_ckpt for stage2"
     torch.manual_seed(cfg.seed)
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
@@ -189,5 +188,9 @@ def main(cfg, stage):
 
 
 if __name__ == "__main__":
-    stage = sys.argv[2] if len(sys.argv) > 2 else "both"
-    main(config.load(sys.argv[1]), stage)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config")
+    parser.add_argument("--stage", choices=["stage1", "stage2", "both"],
+                        default="both")
+    args = parser.parse_args()
+    main(config.load(args.config), args.stage)

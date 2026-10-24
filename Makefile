@@ -15,16 +15,16 @@ check:
 	$(PYTHON) src/check.py $(CONFIG)
 
 train: check
-	$(PYTHON) src/train.py $(CONFIG) $(STAGE)
+	$(PYTHON) src/train.py $(CONFIG) --stage $(STAGE)
 
 evaluate:
-	$(PYTHON) src/evaluate.py $(CONFIG) lizard
+	$(PYTHON) src/evaluate.py $(CONFIG) --model lizard
 
 evaluate-llama:
-	$(PYTHON) src/evaluate.py $(CONFIG) llama
+	$(PYTHON) src/evaluate.py $(CONFIG) --model llama
 
 mmlu-fast:
-	$(PYTHON) src/evaluate.py $(CONFIG) $(MODEL) mmlu-fast
+	$(PYTHON) src/evaluate.py $(CONFIG) --model $(MODEL) --tasks mmlu-fast
 
 push:
 	$(PYTHON) src/push_to_hub.py $(CONFIG)

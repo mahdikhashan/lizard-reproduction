@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 
@@ -53,4 +54,7 @@ def main(cfg):
 
 
 if __name__ == "__main__":
-    sys.exit(1 if main(config.load(sys.argv[1])) else 0)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config")
+    args = parser.parse_args()
+    sys.exit(1 if main(config.load(args.config)) else 0)
