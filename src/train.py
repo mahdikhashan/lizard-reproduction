@@ -2,11 +2,13 @@ import argparse
 import math
 import shutil
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
+from pathlib import Path
 
 import torch
 import wandb
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -161,6 +163,13 @@ def stage2(model, lizard_state, loader, cfg):
     return model.merge_and_unload()
 
 
+def load_stage1(cfg):
+    path = cfg.stage1_ckpt
+    if not path.exists():
+        path = hf_hub_download(cfg.hf_repo, path.name, local_dir=cfg.out_dir)
+    return torch.load(path, map_location="cpu")
+
+
 def save(state, path, cfg):
     torch.save(state, path)
     upload(path, cfg.hf_repo)
@@ -177,7 +186,7 @@ def main(cfg, stage):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     loader = make_loader(tokenizer, cfg)
     if stage == "stage2":
-        lizard_state = torch.load(cfg.stage1_ckpt)
+        lizard_state = load_stage1(cfg)
     else:
         lizard_state = stage1(load_llama(cfg), loader, cfg)
         save(lizard_state, cfg.out_dir / f"{run}-stage1.pt", cfg)
@@ -192,5 +201,9 @@ if __name__ == "__main__":
     parser.add_argument("config")
     parser.add_argument("--stage", choices=["stage1", "stage2", "both"],
                         default="both")
+    parser.add_argument("--stage1-ckpt", type=Path)
     args = parser.parse_args()
-    main(config.load(args.config), args.stage)
+    cfg = config.load(args.config)
+    if args.stage1_ckpt:
+        cfg = replace(cfg, stage1_ckpt=args.stage1_ckpt)
+    main(cfg, args.stage)
