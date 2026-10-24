@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import wandb
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
@@ -142,8 +143,8 @@ def stage1(teacher, loader, cfg):
         total = 0.0
         for i, student in enumerate(students):
             x, rope, target = captured[i]
-            loss = (student(x, rope)[0].float() - target.float()).pow(2).sum()
-            loss = loss / len(students) / cfg.grad_accum
+            loss = F.mse_loss(student(x, rope)[0].float(), target.float())
+            loss = loss * cfg.mse_factor / len(students) / cfg.grad_accum
             loss.backward()
             total += loss.item()
         return total
