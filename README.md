@@ -18,13 +18,17 @@ Llama-3.2-1B needs access on Hugging Face (`hf auth login`). Training logs to wa
 
 ```bash
 make test            # tests on CPU with a tiny model
-make train           # stage 1 and stage 2, needs a GPU, saves to checkpoints/
+make train           # stage 1 and stage 2, needs a GPU, saves and uploads each stage
 make evaluate        # paper metrics (Table 9) for the trained Lizard model
 make evaluate-llama  # the same metrics for the original model
-make push            # upload checkpoints and code to Hugging Face
+make push            # upload the code to Hugging Face
 ```
 
 All settings are in `src/config.py`.
+
+#### Checkpoints
+
+Each run gets a name from the Lizard config, the dtype and the start time, for example `lizard-window128-num_meta4-feature_dim128-bfloat16-20261024-203343`. After each stage, `src/train.py` saves `checkpoints/<run>-stage1.pt` and `checkpoints/<run>-stage2.pt` and uploads them to the private Hugging Face repo `HF_REPO`. The wandb run has the same name. To skip stage 1, set `STAGE1_CKPT` to a stage 1 checkpoint. `make evaluate` loads the newest `*-stage2.pt` in `checkpoints/`.
 
 #### Evaluation
 

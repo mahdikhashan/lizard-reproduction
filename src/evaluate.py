@@ -24,7 +24,9 @@ PAPER = {
 def load(which):
     model = load_llama()
     if which == "lizard":
-        state = torch.load(C.STAGE2_CKPT, map_location="cpu")
+        path = max(C.OUT_DIR.glob("*-stage2.pt"),
+                   key=lambda p: p.stat().st_mtime)
+        state = torch.load(path, map_location="cpu")
         to_lizard(model).load_state_dict(state, strict=True)
     return model.eval()
 

@@ -1,4 +1,5 @@
 import math
+import time
 
 import torch
 import wandb
@@ -9,6 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import config as C
 from lizard_attention import from_llama
+from push_to_hub import upload
 
 
 def is_lizard(name):
@@ -153,18 +155,31 @@ def stage2(model, lizard_state, loader):
     return model.merge_and_unload()
 
 
+def run_name():
+    lizard = "-".join(f"{key}{value}" for key, value in C.LIZARD.items())
+    dtype = str(C.DTYPE).removeprefix("torch.")
+    return f"lizard-{lizard}-{dtype}-{time.strftime('%Y%m%d-%H%M%S')}"
+
+
+def save(state, name):
+    path = C.OUT_DIR / name
+    torch.save(state, path)
+    upload(path)
+
+
 def main():
     torch.manual_seed(C.SEED)
     C.OUT_DIR.mkdir(parents=True, exist_ok=True)
-    wandb.init(project=C.WANDB_PROJECT)
+    run = run_name()
+    wandb.init(project=C.WANDB_PROJECT, name=run)
     loader = make_loader(AutoTokenizer.from_pretrained(C.MODEL_NAME))
-    if C.STAGE1_CKPT.exists():
+    if C.STAGE1_CKPT:
         lizard_state = torch.load(C.STAGE1_CKPT)
     else:
         lizard_state = stage1(load_llama(), loader)
-        torch.save(lizard_state, C.STAGE1_CKPT)
+        save(lizard_state, f"{run}-stage1.pt")
     model = stage2(load_llama(), lizard_state, loader)
-    torch.save(model.state_dict(), C.STAGE2_CKPT)
+    save(model.state_dict(), f"{run}-stage2.pt")
     wandb.finish()
 
 
