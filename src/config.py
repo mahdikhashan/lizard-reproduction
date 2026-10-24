@@ -37,6 +37,7 @@ class Config:
     weight_decay: float
     stage1_lr: float
     stage2_lr: float
+    mse_factor: float
     lora_rank: int
     lora_alpha: int
     lora_targets: tuple[str, ...]
