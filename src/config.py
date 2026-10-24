@@ -35,4 +35,7 @@ STAGE1_CKPT = OUT_DIR / "stage1_lizard.pt"
 STAGE2_CKPT = OUT_DIR / "stage2_model.pt"
 WANDB_PROJECT = "lizard-1b"
 
+EVAL_BATCH_SIZE = 8
+EVAL_LIMIT = None
+
 HF_REPO = "nanoman1/lizard-llama-3.2-1b"

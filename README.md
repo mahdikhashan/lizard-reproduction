@@ -19,16 +19,21 @@ Llama-3.2-1B needs access on Hugging Face (`hf auth login`). Training logs to wa
 ```bash
 make test            # tests on CPU with a tiny model
 make train           # stage 1 and stage 2, needs a GPU, saves to checkpoints/
-make evaluate        # lm-eval on the trained Lizard model
-make evaluate-llama  # lm-eval on the original model
+make evaluate        # paper metrics (Table 9) for the trained Lizard model
+make evaluate-llama  # the same metrics for the original model
 make push            # upload checkpoints and code to Hugging Face
 ```
 
 All settings are in `src/config.py`.
 
+#### Evaluation
+
+`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `checkpoints/eval_<model>.json`. Set `EVAL_LIMIT` in `src/config.py` for a quick run on a few questions per task.
+
 #### Layout
 
 - `src/lizard_attention.py`: the Lizard attention layer
 - `src/train.py`: stage 1 and stage 2 training
-- `src/evaluate.py`: lm-eval benchmarks
+- `src/evaluate.py`: lm-eval benchmarks of the paper
 - `tests/test_lizard.py`: tests against slow loop versions of each formula
+- `tests/test_evaluate.py`: tests of the scoring rules
