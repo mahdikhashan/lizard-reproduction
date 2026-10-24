@@ -1,4 +1,5 @@
 import math
+import sys
 import time
 
 import torch
@@ -167,21 +168,24 @@ def save(state, name):
     upload(path)
 
 
-def main():
+def main(stage):
+    assert stage in ("stage1", "stage2", "both"), stage
+    assert stage != "stage2" or C.STAGE1_CKPT, "set STAGE1_CKPT for stage2"
     torch.manual_seed(C.SEED)
     C.OUT_DIR.mkdir(parents=True, exist_ok=True)
     run = run_name()
     wandb.init(project=C.WANDB_PROJECT, name=run)
     loader = make_loader(AutoTokenizer.from_pretrained(C.MODEL_NAME))
-    if C.STAGE1_CKPT:
+    if stage == "stage2":
         lizard_state = torch.load(C.STAGE1_CKPT)
     else:
         lizard_state = stage1(load_llama(), loader)
         save(lizard_state, f"{run}-stage1.pt")
-    model = stage2(load_llama(), lizard_state, loader)
-    save(model.state_dict(), f"{run}-stage2.pt")
+    if stage != "stage1":
+        model = stage2(load_llama(), lizard_state, loader)
+        save(model.state_dict(), f"{run}-stage2.pt")
     wandb.finish()
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else "both")
