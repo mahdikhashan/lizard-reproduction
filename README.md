@@ -22,6 +22,7 @@ make train           # stage 1 and stage 2, needs a GPU, saves and uploads each 
 make train STAGE=stage1  # only stage 1 (STAGE=stage2 for only stage 2)
 make evaluate        # paper metrics (Table 9) for the trained Lizard model
 make evaluate-llama  # the same metrics for the original model
+make mmlu-fast       # quick MMLU 5-shot, 5 questions per subject (MODEL=llama for the original model)
 make push            # upload the code and the config to Hugging Face
 ```
 
@@ -37,7 +38,7 @@ Each run gets the name of its config file and the start time, for example `lizar
 
 #### Evaluation
 
-`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>.json`. Set `eval_limit` in the config for a quick run on a few questions per task.
+`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>.json`. Set `eval_limit` in the config for a quick run on a few questions per task. `make mmlu-fast` runs only MMLU 5-shot on the first 5 test questions of each of the 57 subjects (285 questions), as `./eval.sh --limit 5` in lolcats, and saves `<config name>-eval-<model>-mmlu-fast.json`.
 
 #### Layout
 
