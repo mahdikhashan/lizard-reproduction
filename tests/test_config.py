@@ -13,7 +13,7 @@ def test_default_config_loads_with_types():
                                        feature_dim=128)
     assert cfg.torch_dtype is torch.bfloat16
     assert cfg.stage1_lr == 1e-3 and isinstance(cfg.eps, float)
-    assert cfg.mse_factor == 1000.0 and isinstance(cfg.mse_factor, float)
+    assert cfg.mse_factor == 1.0 and isinstance(cfg.mse_factor, float)
     assert cfg.betas == (0.9, 0.99)
     assert cfg.lora_targets == ("q_proj", "k_proj", "v_proj")
     assert cfg.out_dir == Path("checkpoints") and cfg.stage1_ckpt is None
