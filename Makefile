@@ -1,8 +1,9 @@
 PYTHON ?= python
 CONFIG ?= configs/lizard-1b.yaml
 STAGE ?= both
+MODEL ?= lizard
 
-.PHONY: env test train evaluate evaluate-llama push
+.PHONY: env test train evaluate evaluate-llama mmlu-fast push
 
 env:
 	conda env create -f envs/distill_lizard_llama_3_2_1B.yaml
@@ -18,6 +19,9 @@ evaluate:
 
 evaluate-llama:
 	$(PYTHON) src/evaluate.py $(CONFIG) llama
+
+mmlu-fast:
+	$(PYTHON) src/evaluate.py $(CONFIG) $(MODEL) mmlu-fast
 
 push:
 	$(PYTHON) src/push_to_hub.py $(CONFIG)
