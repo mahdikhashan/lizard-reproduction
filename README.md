@@ -46,6 +46,16 @@ Each experiment is one YAML file in `configs/`. To add one, copy `configs/lizard
 
 Each run gets the name of its config file and the start time, for example `lizard-1b-20261024-203343`. At the start, `src/train.py` saves a copy of the config as `<run>.yaml`. After each stage, it saves `<run>-stage1.pt` and `<run>-stage2.pt`. It uploads all three files to the private Hugging Face repo `hf_repo` and keeps them in `out_dir`. The wandb run has the same name. `STAGE=stage2` trains only stage 2 from the stage 1 checkpoint in `stage1_ckpt`. `make evaluate` loads the newest `<config name>-*-stage2.pt` in `out_dir`.
 
+#### Start stage 2 from a checkpoint
+
+Pass a stage 1 checkpoint and train only stage 2:
+
+```bash
+make train STAGE=stage2 STAGE1_CKPT=checkpoints/lizard-1b-20261024-203343-stage1.pt
+```
+
+Without make: `python src/train.py configs/lizard-1b.yaml --stage stage2 --stage1-ckpt <path>`. You can also set `stage1_ckpt` in the config, and `STAGE1_CKPT` overrides it. If the file is not on this machine, it is downloaded by its name from `hf_repo` into `out_dir`. Thus the name of a checkpoint of an earlier run, for example `lizard-1b-20261024-203343-stage1.pt`, is enough. Stage 2 gets a new run name, and its checkpoint is saved and uploaded as usual.
+
 #### Evaluation
 
 `src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>-all.json`. Set `eval_limit` in the config for a quick run on a few questions per task. `make mmlu-fast` runs only MMLU 5-shot on the first 5 test questions of each of the 57 subjects (285 questions), as `./eval.sh --limit 5` in lolcats, and saves `<config name>-eval-<model>-mmlu-fast.json`.
