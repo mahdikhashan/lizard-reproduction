@@ -1,40 +1,68 @@
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import torch
+import yaml
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B"
-DATASET_NAME = "yahma/alpaca-cleaned"
-NUM_EXAMPLES = 50_000
-SEQ_LEN = 2048
-DTYPE = torch.bfloat16
-DEVICE = "cuda"
-SEED = 42
-
-LIZARD = {"window": 128, "num_meta": 4, "feature_dim": 128}
 LIZARD_PARAMS = ("phi_q", "phi_k", "W_gamma", "meta_tokens", "alpha_blend")
 
-MICRO_BATCH = 1
-GRAD_ACCUM = 8
-EPOCHS = 2
-WARMUP_RATIO = 0.1
-MIN_LR_RATIO = 0.1
-GRAD_CLIP = 1.0
-BETAS = (0.9, 0.99)
-EPS = 1e-8
-WEIGHT_DECAY = 0.0
-STAGE1_LR = 1e-3
-STAGE2_LR = 5e-4
 
-LORA_RANK = 8
-LORA_ALPHA = 16
-LORA_TARGETS = ["q_proj", "k_proj", "v_proj"]
-GRADIENT_CHECKPOINTING = True
+@dataclass(frozen=True)
+class Lizard:
+    window: int
+    num_meta: int
+    feature_dim: int
 
-OUT_DIR = Path("checkpoints")
-STAGE1_CKPT = None
-WANDB_PROJECT = "lizard-1b"
 
-EVAL_BATCH_SIZE = 8
-EVAL_LIMIT = None
+@dataclass(frozen=True)
+class Config:
+    name: str
+    path: Path
+    model_name: str
+    dataset_name: str
+    num_examples: int
+    seq_len: int
+    dtype: str
+    device: str
+    seed: int
+    lizard: Lizard
+    micro_batch: int
+    grad_accum: int
+    epochs: int
+    warmup_ratio: float
+    min_lr_ratio: float
+    grad_clip: float
+    betas: tuple[float, float]
+    eps: float
+    weight_decay: float
+    stage1_lr: float
+    stage2_lr: float
+    lora_rank: int
+    lora_alpha: int
+    lora_targets: tuple[str, ...]
+    gradient_checkpointing: bool
+    out_dir: Path
+    stage1_ckpt: Path | None
+    wandb_project: str
+    eval_batch_size: int
+    eval_limit: int | None
+    hf_repo: str
 
-HF_REPO = "nanoman1/lizard-llama-3.2-1b"
+    @property
+    def torch_dtype(self):
+        return getattr(torch, self.dtype)
+
+
+def load(path):
+    path = Path(path)
+    data = yaml.safe_load(path.read_text())
+    for field in fields(Config):
+        if field.type is float:
+            data[field.name] = float(data[field.name])
+    data["lizard"] = Lizard(**data["lizard"])
+    data["betas"] = tuple(float(beta) for beta in data["betas"])
+    data["lora_targets"] = tuple(data["lora_targets"])
+    data["out_dir"] = Path(data["out_dir"])
+    if data["stage1_ckpt"] is not None:
+        data["stage1_ckpt"] = Path(data["stage1_ckpt"])
+    return Config(name=path.stem, path=path, **data)
