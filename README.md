@@ -63,6 +63,8 @@ Without make: `python src/train.py configs/lizard-1b.yaml --stage stage2 --stage
 #### Layout
 
 - `configs/`: one YAML file for each experiment
+  - `lizard-1b.yaml`: the default, with `mse_factor: 1`
+  - `lizard-1b-mse1000.yaml`: the same with `mse_factor: 1000`, the scale of lolcats
 - `src/config.py`: the `Config` dataclass and its YAML loader
 - `src/lizard_attention.py`: the Lizard attention layer
 - `src/check.py`: checks of Hugging Face and wandb before training
