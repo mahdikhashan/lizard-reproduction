@@ -1,6 +1,7 @@
 import argparse
 import math
 import shutil
+import sys
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -11,6 +12,7 @@ from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import config
@@ -68,38 +70,55 @@ def lr_factor(step, total, cfg):
     return cfg.min_lr_ratio + (1 - cfg.min_lr_ratio) * cosine
 
 
-def log(stage, loss, named):
-    values = {"loss": loss}
+def log(stage, loss, named, lr, norm):
+    values = {"loss": loss, "lr": lr, "grad_norm": norm.item()}
     for key in ("alpha_blend", "meta_tokens"):
-        means = [p.detach().mean() for n, p in named if n.endswith(key)]
+        means = [p.detach().float().mean() for n, p in named
+                 if n.endswith(key)]
         values[key] = torch.stack(means).mean().item()
-    print(stage, values)
     if wandb.run is not None:
         wandb.log({f"{stage}/{k}": v for k, v in values.items()})
+    return {"loss": f"{loss:.4g}", "lr": f"{lr:.2e}",
+            "norm": f"{values['grad_norm']:.3g}",
+            "alpha": f"{values['alpha_blend']:.4f}",
+            "meta": f"{values['meta_tokens']:.2e}"}
 
 
 def train(named, step_fn, loader, lr, stage, cfg):
     params = [p for _, p in named]
-    total = cfg.epochs * (len(loader) // cfg.grad_accum)
+    steps_per_epoch = len(loader) // cfg.grad_accum
+    total = cfg.epochs * steps_per_epoch
+    print(f"{stage}: {len(loader)} sequences of {cfg.seq_len} tokens, "
+          f"{cfg.micro_batch * cfg.grad_accum} sequences per step, "
+          f"{steps_per_epoch} steps per epoch x {cfg.epochs} epochs = "
+          f"{total} steps")
     optimizer = torch.optim.AdamW(params, lr=lr, betas=cfg.betas,
                                   eps=cfg.eps, weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda step: lr_factor(step, total, cfg))
-    for _ in range(cfg.epochs):
+    bar = tqdm(total=total, desc=stage, dynamic_ncols=True,
+               mininterval=1 if sys.stderr.isatty() else 30)
+    for epoch in range(cfg.epochs):
+        bar.set_description(f"{stage} epoch {epoch + 1}/{cfg.epochs}")
         optimizer.zero_grad()
         loss = 0.0
         for i, batch in enumerate(loader):
             loss += step_fn(batch.to(cfg.device))
             if (i + 1) % cfg.grad_accum == 0:
                 norm = torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
+                step_lr = optimizer.param_groups[0]["lr"]
                 if torch.isfinite(norm):
                     optimizer.step()
                 else:
-                    print(stage, "skipped step: gradient is not finite")
+                    bar.write(f"{stage} step {bar.n + 1}: skipped, "
+                              "gradient is not finite")
                 scheduler.step()
                 optimizer.zero_grad()
-                log(stage, loss, named)
+                bar.set_postfix(log(stage, loss, named, step_lr, norm),
+                                refresh=False)
+                bar.update()
                 loss = 0.0
+    bar.close()
 
 
 def stage1(teacher, loader, cfg):
