@@ -1,0 +1,40 @@
+model_name: meta-llama/Llama-3.2-1B
+dataset_name: yahma/alpaca-cleaned
+num_examples: 50000
+seq_len: 2048
+dtype: bfloat16
+device: cuda
+seed: 42
+
+lizard:
+  window: 128
+  num_meta: 4
+  feature_dim: 128
+  backend: triton
+
+micro_batch: 1
+grad_accum: 8
+epochs: 2
+warmup_ratio: 0.1
+min_lr_ratio: 0.1
+grad_clip: 1.0
+betas: [0.9, 0.99]
+eps: 1e-8
+weight_decay: 0.0
+stage1_lr: 1e-3
+stage2_lr: 5e-4
+mse_factor: 1000
+
+lora_rank: 8
+lora_alpha: 16
+lora_targets: [q_proj, k_proj, v_proj]
+gradient_checkpointing: true
+
+out_dir: checkpoints
+stage1_ckpt: null
+wandb_project: lizard-1b
+
+eval_batch_size: 1
+eval_limit: null
+
+hf_repo: nanoman1/lizard-llama-3.2-1b

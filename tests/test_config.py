@@ -11,7 +11,7 @@ def test_default_config_loads_with_types():
     cfg = config.load("configs/lizard-1b.yaml")
     assert cfg.name == "lizard-1b"
     assert cfg.lizard == config.Lizard(window=128, num_meta=4,
-                                       feature_dim=128)
+                                       feature_dim=128, backend="torch")
     assert cfg.torch_dtype is torch.bfloat16
     assert cfg.stage1_lr == 1e-3 and isinstance(cfg.eps, float)
     assert cfg.mse_factor == 1.0 and isinstance(cfg.mse_factor, float)
@@ -33,6 +33,16 @@ def test_mse1000_config_differs_only_in_mse_factor():
     assert other.mse_factor == 1000.0
     assert replace(other, name=base.name, path=base.path,
                    mse_factor=base.mse_factor) == base
+
+
+
+@pytest.mark.parametrize("name", ["lizard-1b", "lizard-1b-mse1000"])
+def test_triton_config_differs_only_in_backend(name):
+    base = config.load(f"configs/{name}.yaml")
+    other = config.load(f"configs/{name}-triton.yaml")
+    assert other.lizard.backend == "triton"
+    assert replace(other, name=base.name, path=base.path,
+                   lizard=base.lizard) == base
 
 
 def test_unknown_key_is_an_error(tmp_path):

@@ -10,6 +10,7 @@ lizard:
   window: 128
   num_meta: 4
   feature_dim: 128
+  backend: torch
 
 micro_batch: 1
 grad_accum: 8

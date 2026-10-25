@@ -12,6 +12,7 @@ class Lizard:
     window: int
     num_meta: int
     feature_dim: int
+    backend: str
 
 
 @dataclass(frozen=True)

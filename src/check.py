@@ -36,8 +36,17 @@ def check_wandb(api, cfg):
     return f"logged in as {viewer.username}, project {cfg.wandb_project}"
 
 
+def check_kernels(api, cfg):
+    if cfg.lizard.backend != "triton":
+        return "skipped, backend torch"
+    import torch
+    import triton
+    assert torch.cuda.is_available(), "the triton backend needs a CUDA GPU"
+    return f"triton {triton.__version__} on {torch.cuda.get_device_name()}"
+
+
 CHECKS = [check_hf_login, check_hf_model, check_hf_dataset, check_hf_upload,
-          check_wandb]
+          check_wandb, check_kernels]
 
 
 def main(cfg):

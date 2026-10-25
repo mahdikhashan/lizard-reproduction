@@ -18,9 +18,11 @@ Llama-3.2-1B needs access on Hugging Face (`hf auth login`). Training logs to wa
 
 ```bash
 make test            # tests on CPU with a tiny model
+make test-kernels    # only the checks of the Triton kernels against PyTorch
 make check           # check Hugging Face and wandb access (make train runs it first)
 make train           # stage 1 and stage 2, needs a GPU, saves and uploads each stage
 make train STAGE=stage1  # only stage 1 (STAGE=stage2 for only stage 2)
+make train-kernel    # the same training with the Triton kernels (KERNEL_CONFIG)
 make evaluate        # paper metrics (Table 9) for the trained Lizard model
 make evaluate-llama  # the same metrics for the original model
 make mmlu-fast       # quick MMLU 5-shot, 5 questions per subject (MODEL=llama for the original model)
@@ -34,6 +36,23 @@ Every command uses `CONFIG=configs/lizard-1b.yaml` by default. Pass another conf
 
 Each experiment is one YAML file in `configs/`. To add one, copy `configs/lizard-1b.yaml`, give it a new name and change the values. `src/config.py` loads a file into a typed `Config` dataclass, with the attention shape in a nested `Lizard` dataclass. A missing or unknown key is an error. Without make: `python src/train.py configs/<name>.yaml --stage stage1`. Each script prints its arguments with `--help`.
 
+#### Triton kernels
+
+`src/kernels/` has custom Triton kernels for the two branches of Lizard attention, with a forward and a backward pass in bfloat16. They load bf16 tensors, compute the dot products on tensor cores, accumulate in float32 and return bf16 outputs. Like flash attention, they never build the L x L matrices.
+
+- `kernels.gla(fq, fk, v, log_gamma)`: the gated branch. It uses the cumulative log gates, so each decay is `exp(G_i - G_t)` with `t <= i` and cannot overflow.
+- `kernels.swa(q, k, v, meta, window)`: the window branch with sinks. It keeps a running maximum and sum over the window, and starts them with the sinks.
+
+A config selects the attention with `lizard.backend`: `torch` (the PyTorch code of `src/lizard_attention.py`) or `triton`. The `-triton` configs are copies of the other configs with `backend: triton`:
+
+```bash
+make train-kernel STAGE=stage1                                    # configs/lizard-1b-mse1000-triton.yaml
+make train-kernel KERNEL_CONFIG=configs/lizard-1b-triton.yaml
+make mmlu-fast CONFIG=configs/lizard-1b-mse1000-triton.yaml       # evaluation with the kernels
+```
+
+The Triton backend needs a CUDA GPU. `make check` and `make train-kernel` check that Triton imports and that a GPU is there. `make test-kernels` compares the forward and backward pass of each kernel, and of a whole layer, with the PyTorch implementation. Without a GPU, the tests run the kernels in the Triton interpreter (`TRITON_INTERPRET=1`, set by `tests/conftest.py`), which computes the dot products in float32 because numpy has no bf16.
+
 #### Checks before training
 
 `make train` first runs `make check` (`src/check.py`), and stops if one check fails. The checks are:
@@ -41,7 +60,8 @@ Each experiment is one YAML file in `configs/`. To add one, copy `configs/lizard
 - a Hugging Face login;
 - read access to `model_name` (Llama is gated) and to `dataset_name`;
 - write access to `hf_repo`, which is created as a private repo if it does not exist;
-- a wandb login. This check is skipped when `WANDB_MODE` is `disabled` or `offline`.
+- a wandb login. This check is skipped when `WANDB_MODE` is `disabled` or `offline`;
+- Triton and a CUDA GPU, only when the config has `backend: triton`.
 
 #### Checkpoints
 
@@ -77,8 +97,10 @@ A stage 1 checkpoint has only the Lizard parameters. They go into the original m
 - `configs/`: one YAML file for each experiment
   - `lizard-1b.yaml`: the default, with `mse_factor: 1`
   - `lizard-1b-mse1000.yaml`: the same with `mse_factor: 1000`, the scale of lolcats
+  - `lizard-1b-triton.yaml`, `lizard-1b-mse1000-triton.yaml`: the same with the Triton kernels
 - `src/config.py`: the `Config` dataclass and its YAML loader
 - `src/lizard_attention.py`: the Lizard attention layer
+- `src/kernels/`: Triton kernels of the gated branch (`gla.py`) and the window branch (`swa.py`)
 - `src/check.py`: checks of Hugging Face and wandb before training
 - `src/train.py`: stage 1 and stage 2 training
 - `src/evaluate.py`: lm-eval benchmarks of the paper
@@ -86,3 +108,4 @@ A stage 1 checkpoint has only the Lizard parameters. They go into the original m
 - `tests/test_evaluate.py`: tests of the scoring rules
 - `tests/test_config.py`: tests of the config loader
 - `tests/test_check.py`: tests of the checks before training
+- `tests/test_kernels.py`: the Triton kernels against the PyTorch implementation
