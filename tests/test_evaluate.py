@@ -38,7 +38,8 @@ def test_paper_average_excludes_mmlu():
 
 def test_load_takes_stage1_and_stage2_checkpoints(tmp_path, monkeypatch):
     cfg = replace(config.load("configs/lizard-1b.yaml"), out_dir=tmp_path,
-                  lizard=config.Lizard(window=8, num_meta=4, feature_dim=8))
+                  lizard=config.Lizard(window=8, num_meta=4, feature_dim=8,
+                                       backend="torch"))
     torch.manual_seed(0)
     teacher = LlamaForCausalLM(tiny_config(layers=2))
     monkeypatch.setattr(evaluate, "load_llama",

@@ -2,6 +2,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 
@@ -45,8 +46,10 @@ def awa(q, k, v, meta, window):
 
 class LizardAttention(nn.Module):
     def __init__(self, config, layer_idx, window=128, num_meta=4,
-                 feature_dim=128):
+                 feature_dim=128, backend="torch"):
         super().__init__()
+        assert backend in ("torch", "triton"), backend
+        self.backend = backend
         hidden = config.hidden_size
         self.layer_idx = layer_idx
         self.heads = config.num_attention_heads
@@ -78,13 +81,19 @@ class LizardAttention(nn.Module):
         q = self.split(self.q_proj(x), self.heads).to(dtype)
         k = self.split(self.k_proj(x), self.kv_heads).to(dtype)
         v = self.split(self.v_proj(x), self.kv_heads).to(dtype)
-        gamma = torch.sigmoid(self.W_gamma(x).to(dtype)).squeeze(-1)
+        z = self.W_gamma(x).to(dtype).squeeze(-1)
         fq = hedgehog(q, self.phi_q.weight.to(dtype))
         fk = hedgehog(k, self.phi_k.weight.to(dtype))
         cos, sin = (t.to(dtype) for t in position_embeddings)
         qr, kr = apply_rotary_pos_emb(q, k, cos, sin)
-        y = gla(fq, fk, v, gamma) + self.alpha_blend.to(dtype) * awa(
-            qr, kr, v, self.meta_tokens.to(dtype), self.window)
+        alpha, meta = self.alpha_blend.to(dtype), self.meta_tokens.to(dtype)
+        if self.backend == "triton":
+            import kernels
+            y = kernels.gla(fq, fk, v, F.logsigmoid(z)).to(dtype)
+            y = y + alpha * kernels.swa(qr, kr, v, meta, self.window).to(dtype)
+        else:
+            y = gla(fq, fk, v, torch.sigmoid(z))
+            y = y + alpha * awa(qr, kr, v, meta, self.window)
         return self.o_proj(y.to(x.dtype).transpose(1, 2).flatten(2)), None
 
 
