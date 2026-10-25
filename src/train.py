@@ -1,4 +1,5 @@
 import argparse
+import io
 import math
 import shutil
 import sys
@@ -194,7 +195,16 @@ def load_stage1(cfg):
 
 
 def save(state, path, cfg):
-    torch.save(state, path)
+    try:
+        torch.save(state, path)
+    except (OSError, RuntimeError) as error:
+        print(f"could not save {path} ({error}), uploading it from memory")
+        path.unlink(missing_ok=True)
+        buffer = io.BytesIO()
+        torch.save(state, buffer)
+        buffer.seek(0)
+        upload(path, cfg.hf_repo, buffer)
+        return
     upload(path, cfg.hf_repo)
 
 
