@@ -42,13 +42,32 @@ def compare(kernel, reference, inputs, grad):
         assert close(a.grad, b.grad, BACKWARD)
 
 
-def gla_inputs(length, batch=2, heads=3, features=24, dim=20):
+def gla_inputs(length, gates=(), shift=0.0, batch=2, heads=3, features=24,
+               dim=20):
     bf = torch.bfloat16
     fq = torch.randn(batch, heads, length, features).softmax(-1).to(bf)
     fk = torch.randn(batch, heads, length, features).softmax(-1).to(bf)
     v = torch.randn(batch, heads, length, dim).to(bf)
-    z = 2 * torch.randn(batch, length)
+    z = 2 * torch.randn(batch, *gates, length) + shift
     return [t.to(DEVICE) for t in (fq, fk, v, z)]
+
+
+def gla_kernel(chunk):
+    def kernel(fq, fk, v, z):
+        return kernels.gla(fq, fk, v, F.logsigmoid(z), chunk)
+    return kernel
+
+
+def gla_reference(fq, fk, v, z):
+    batch, heads, length, _ = fq.shape
+    if z.dim() == 2:
+        return lz.gla(fq.float(), fk.float(), v.float(), torch.sigmoid(z))
+
+    def fold(t):
+        return t.float().reshape(batch * heads, 1, length, -1)
+    gamma = torch.sigmoid(z).reshape(batch * heads, length)
+    y = lz.gla(fold(fq), fold(fk), fold(v), gamma)
+    return y.reshape(batch, heads, length, -1)
 
 
 def swa_inputs(length, batch=2, heads=3, dim=20, sinks=4):
@@ -57,20 +76,35 @@ def swa_inputs(length, batch=2, heads=3, dim=20, sinks=4):
     return [t.to(DEVICE) for t in (q, k, v, torch.randn(sinks))]
 
 
-@pytest.mark.parametrize("length, blocks", [(1, SMALL), (77, SMALL),
-                                            (150, None)])
-def test_gla_kernel_matches_torch(length, blocks):
+@pytest.mark.parametrize("length, chunk", [(1, 16), (77, 16), (150, 64)])
+def test_gla_kernel_matches_torch(length, chunk):
     torch.manual_seed(0)
     inputs = gla_inputs(length)
-    blocks = blocks or (kernels.gla.__defaults__)
+    compare(gla_kernel(chunk), gla_reference, inputs,
+            torch.randn_like(inputs[2].float()))
 
-    def kernel(fq, fk, v, z):
-        return kernels.gla(fq, fk, v, F.logsigmoid(z), *blocks)
 
-    def reference(fq, fk, v, z):
-        return lz.gla(fq.float(), fk.float(), v.float(), torch.sigmoid(z))
+def test_gla_kernel_with_a_gate_per_head_matches_torch():
+    torch.manual_seed(0)
+    inputs = gla_inputs(100, gates=(3,))
+    compare(gla_kernel(16), gla_reference, inputs,
+            torch.randn_like(inputs[2].float()))
 
-    compare(kernel, reference, inputs, torch.randn_like(inputs[2].float()))
+
+def test_gla_kernel_with_strong_decay_matches_torch():
+    torch.manual_seed(0)
+    inputs = gla_inputs(200, shift=-6.0)
+    assert F.logsigmoid(inputs[3]).sum(-1).max() < -1000
+    compare(gla_kernel(16), gla_reference, inputs,
+            torch.randn_like(inputs[2].float()))
+
+
+def test_gla_kernel_without_grad_gives_the_same_output():
+    torch.manual_seed(0)
+    fq, fk, v, z = gla_inputs(70)
+    y = kernels.gla(fq, fk, v.requires_grad_(), F.logsigmoid(z), 16)
+    with torch.no_grad():
+        assert torch.equal(kernels.gla(fq, fk, v, F.logsigmoid(z), 16), y)
 
 
 @pytest.mark.parametrize("length, window, blocks", [(1, 8, SMALL),

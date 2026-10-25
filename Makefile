@@ -6,7 +6,7 @@ MODEL ?= lizard
 STAGE1_CKPT ?=
 CKPT ?=
 
-.PHONY: env test test-kernels check train train-kernel evaluate evaluate-llama mmlu-fast push
+.PHONY: env test test-kernels check train train-kernel benchmark evaluate evaluate-llama mmlu-fast push
 
 env:
 	conda env create -f envs/distill_lizard_llama_3_2_1B.yaml
@@ -26,6 +26,9 @@ train: check
 train-kernel:
 	$(PYTHON) src/check.py $(KERNEL_CONFIG)
 	$(PYTHON) src/train.py $(KERNEL_CONFIG) --stage $(STAGE) $(if $(STAGE1_CKPT),--stage1-ckpt $(STAGE1_CKPT))
+
+benchmark:
+	$(PYTHON) src/benchmark.py
 
 evaluate:
 	$(PYTHON) src/evaluate.py $(CONFIG) --model lizard $(if $(CKPT),--checkpoint $(CKPT))
