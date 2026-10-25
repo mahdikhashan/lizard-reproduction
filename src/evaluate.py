@@ -1,5 +1,6 @@
 import argparse
 import json
+from pathlib import Path
 
 import torch
 from lm_eval import simple_evaluate
@@ -7,7 +8,7 @@ from lm_eval.models.huggingface import HFLM
 from transformers import AutoTokenizer
 
 import config
-from train import load_llama, to_lizard
+from train import fetch, is_lizard, load_llama, to_lizard
 
 FAST_MMLU_LIMIT = 5
 ZERO_SHOT = {"piqa": "acc", "arc_easy": "acc", "arc_challenge": "acc_norm",
@@ -22,13 +23,19 @@ PAPER = {
 }
 
 
-def load(cfg, which):
+def load(cfg, which, checkpoint=None):
     model = load_llama(cfg)
-    if which == "lizard":
-        path = max(cfg.out_dir.glob(f"{cfg.name}-*-stage2.pt"),
-                   key=lambda p: p.stat().st_mtime)
-        state = torch.load(path, map_location="cpu")
-        to_lizard(model, cfg).load_state_dict(state, strict=True)
+    if which == "llama":
+        return model.eval()
+    path = checkpoint or max(cfg.out_dir.glob(f"{cfg.name}-*-stage2.pt"),
+                             key=lambda p: p.stat().st_mtime)
+    state = torch.load(fetch(path, cfg), map_location="cpu")
+    model = to_lizard(model, cfg)
+    if all(is_lizard(key) for key in state):
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        assert not unexpected and not any(map(is_lizard, missing))
+    else:
+        model.load_state_dict(state, strict=True)
     return model.eval()
 
 
@@ -53,9 +60,9 @@ def run_mmlu(lm, limit):
     return out["results"], subjects
 
 
-def main(cfg, which, tasks):
+def main(cfg, which, tasks, checkpoint=None):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
-    lm = HFLM(pretrained=load(cfg, which), tokenizer=tokenizer,
+    lm = HFLM(pretrained=load(cfg, which, checkpoint), tokenizer=tokenizer,
               batch_size=cfg.eval_batch_size, add_bos_token=False)
     if tasks == "mmlu-fast":
         results, subjects = run_mmlu(lm, FAST_MMLU_LIMIT)
@@ -71,7 +78,8 @@ def main(cfg, which, tasks):
         print(f"{task:<15}{value:>8.1f}{PAPER['lizard'][task]:>8.1f}"
               f"{PAPER['llama'][task]:>9.1f}")
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    name = f"{cfg.name}-eval-{which}-{tasks}.json"
+    base = checkpoint.stem if checkpoint else cfg.name
+    name = f"{base}-eval-{which}-{tasks}.json"
     with open(cfg.out_dir / name, "w") as f:
         json.dump({"scores": scores, "results": results}, f, indent=2,
                   default=str)
@@ -84,5 +92,8 @@ if __name__ == "__main__":
                         default="lizard")
     parser.add_argument("--tasks", choices=["all", "mmlu-fast"],
                         default="all")
+    parser.add_argument("--checkpoint", type=Path)
     args = parser.parse_args()
-    main(config.load(args.config), args.model, args.tasks)
+    if args.checkpoint and args.model == "llama":
+        parser.error("--checkpoint needs --model lizard")
+    main(config.load(args.config), args.model, args.tasks, args.checkpoint)

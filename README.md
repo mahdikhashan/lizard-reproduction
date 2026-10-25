@@ -24,6 +24,7 @@ make train STAGE=stage1  # only stage 1 (STAGE=stage2 for only stage 2)
 make evaluate        # paper metrics (Table 9) for the trained Lizard model
 make evaluate-llama  # the same metrics for the original model
 make mmlu-fast       # quick MMLU 5-shot, 5 questions per subject (MODEL=llama for the original model)
+make mmlu-fast CKPT=checkpoints/<run>-stage1.pt  # the same on a given checkpoint
 make push            # upload the code and the config to Hugging Face
 ```
 
@@ -59,6 +60,17 @@ Without make: `python src/train.py configs/lizard-1b.yaml --stage stage2 --stage
 #### Evaluation
 
 `src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>-all.json`. Set `eval_limit` in the config for a quick run on a few questions per task. `make mmlu-fast` runs only MMLU 5-shot on the first 5 test questions of each of the 57 subjects (285 questions), as `./eval.sh --limit 5` in lolcats, and saves `<config name>-eval-<model>-mmlu-fast.json`.
+
+#### Evaluate a given checkpoint
+
+`CKPT` evaluates one checkpoint, of stage 1 or of stage 2, in place of the newest stage 2 checkpoint:
+
+```bash
+make mmlu-fast CONFIG=configs/lizard-1b-mse1000.yaml CKPT=checkpoints/lizard-1b-mse1000-20261024-232317-stage1.pt
+make evaluate CKPT=checkpoints/<run>-stage2.pt
+```
+
+A stage 1 checkpoint has only the Lizard parameters. They go into the original model, with the q, k, v and o weights of the teacher and no LoRA. Use the config of the run, because it sets the window, the sinks and the feature dimension. If the file is not on this machine, it is downloaded by its name from `hf_repo`. The results are saved as `<checkpoint name>-eval-lizard-<tasks>.json`. Without make: `python src/evaluate.py <config> --tasks mmlu-fast --checkpoint <path>`.
 
 #### Layout
 

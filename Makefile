@@ -3,6 +3,7 @@ CONFIG ?= configs/lizard-1b.yaml
 STAGE ?= both
 MODEL ?= lizard
 STAGE1_CKPT ?=
+CKPT ?=
 
 .PHONY: env test check train evaluate evaluate-llama mmlu-fast push
 
@@ -19,13 +20,13 @@ train: check
 	$(PYTHON) src/train.py $(CONFIG) --stage $(STAGE) $(if $(STAGE1_CKPT),--stage1-ckpt $(STAGE1_CKPT))
 
 evaluate:
-	$(PYTHON) src/evaluate.py $(CONFIG) --model lizard
+	$(PYTHON) src/evaluate.py $(CONFIG) --model lizard $(if $(CKPT),--checkpoint $(CKPT))
 
 evaluate-llama:
 	$(PYTHON) src/evaluate.py $(CONFIG) --model llama
 
 mmlu-fast:
-	$(PYTHON) src/evaluate.py $(CONFIG) --model $(MODEL) --tasks mmlu-fast
+	$(PYTHON) src/evaluate.py $(CONFIG) --model $(MODEL) --tasks mmlu-fast $(if $(CKPT),--checkpoint $(CKPT))
 
 push:
 	$(PYTHON) src/push_to_hub.py $(CONFIG)

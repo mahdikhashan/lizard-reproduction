@@ -183,11 +183,14 @@ def stage2(model, lizard_state, loader, cfg):
     return model.merge_and_unload()
 
 
-def load_stage1(cfg):
-    path = cfg.stage1_ckpt
+def fetch(path, cfg):
     if not path.exists():
         path = hf_hub_download(cfg.hf_repo, path.name, local_dir=cfg.out_dir)
-    return torch.load(path, map_location="cpu")
+    return path
+
+
+def load_stage1(cfg):
+    return torch.load(fetch(cfg.stage1_ckpt, cfg), map_location="cpu")
 
 
 def save(state, path, cfg):
