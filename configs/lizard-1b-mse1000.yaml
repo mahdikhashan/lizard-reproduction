@@ -33,7 +33,7 @@ out_dir: checkpoints
 stage1_ckpt: null
 wandb_project: lizard-1b
 
-eval_batch_size: 8
+eval_batch_size: 1
 eval_limit: null
 
 hf_repo: nanoman1/lizard-llama-3.2-1b
