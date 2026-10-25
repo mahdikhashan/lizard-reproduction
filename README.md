@@ -92,7 +92,7 @@ The times are medians of `triton.testing.do_bench`. A shape that does not fit in
 
 #### Checkpoints
 
-Each run gets the name of its config file and the start time, for example `lizard-1b-20261024-203343`. At the start, `src/train.py` saves a copy of the config as `<run>.yaml`. After each stage, it saves `<run>-stage1.pt` and `<run>-stage2.pt`. It uploads all three files to the private Hugging Face repo `hf_repo` and keeps them in `out_dir`. The wandb run has the same name. `STAGE=stage2` trains only stage 2 from the stage 1 checkpoint in `stage1_ckpt`. `make evaluate` loads the newest `<config name>-*-stage2.pt` in `out_dir`.
+Each run gets the name of its config file and the start time, for example `lizard-1b-20261024-203343`. At the start, `src/train.py` saves a copy of the config as `<run>.yaml`. After each stage, it saves `<run>-stage1.pt` and `<run>-stage2.pt`. It uploads all three files to the private Hugging Face repo `hf_repo` and keeps them in `out_dir`. If a checkpoint cannot be written, for example because the disk is full, `src/train.py` deletes the partial file and uploads the checkpoint from memory. Thus the trained weights are not lost. A stage 2 checkpoint is approximately 2.6 GB, so check the free space (`df -h`) before a run, and delete local checkpoints after their upload. The wandb run has the same name. `STAGE=stage2` trains only stage 2 from the stage 1 checkpoint in `stage1_ckpt`. `make evaluate` loads the newest `<config name>-*-stage2.pt` in `out_dir`.
 
 #### Start stage 2 from a checkpoint
 
