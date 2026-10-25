@@ -12,6 +12,8 @@ def block_size(n):
 
 @triton.jit
 def dot(a, b, F32: tl.constexpr):
+    a = a.to(tl.bfloat16)
+    b = b.to(tl.bfloat16)
     if F32:
         a = a.to(tl.float32)
         b = b.to(tl.float32)
