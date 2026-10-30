@@ -60,3 +60,16 @@ def test_load_takes_stage1_and_stage2_checkpoints(tmp_path, monkeypatch):
 
     got = evaluate.load(cfg, "lizard", tmp_path / "run-stage2.pt").state_dict()
     assert all(torch.equal(got[k], v) for k, v in full.items())
+
+
+def test_letters_count_the_predicted_and_the_right_answers():
+    def row(scores, target):
+        return {"filtered_resps": [(s, False) for s in scores],
+                "target": target}
+    samples = {"mmlu_anatomy": [row([-1, -3, -2, -4], 2),
+                                row([-5, -1, -2, -3], 1)],
+               "mmlu_law": [row([-2, -2.5, -0.5, -9], 3)],
+               "piqa": [row([0, -1], 1)]}
+    counts = evaluate.letters(samples)
+    assert counts["pred"] == {"A": 1, "B": 1, "C": 1, "D": 0}
+    assert counts["gold"] == {"A": 0, "B": 1, "C": 1, "D": 1}

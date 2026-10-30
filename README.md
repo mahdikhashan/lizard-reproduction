@@ -24,8 +24,10 @@ make train           # stage 1 and stage 2, needs a GPU, saves and uploads each 
 make train STAGE=stage1  # only stage 1 (STAGE=stage2 for only stage 2)
 make train-kernel    # the same training with the Triton kernels (KERNEL_CONFIG)
 make benchmark       # latency of the GLA kernel against flash-linear-attention, needs a GPU
+make xai             # XAI figures of the PyTorch and the Triton checkpoints against the teacher
 make evaluate        # paper metrics (Table 9) for the trained Lizard model
 make evaluate-llama  # the same metrics for the original model
+make mmlu            # only the full MMLU 5-shot, with the counts of the answer letters
 make mmlu-fast       # quick MMLU 5-shot, 5 questions per subject (MODEL=llama for the original model)
 make mmlu-fast CKPT=checkpoints/<run>-stage1.pt  # the same on a given checkpoint
 make push            # upload the code and the config to Hugging Face
@@ -80,6 +82,48 @@ The columns are:
 
 The times are medians of `triton.testing.do_bench`. A shape that does not fit in the GPU memory shows `OOM`.
 
+#### XAI figures
+
+`src/xai.py` compares trained checkpoints with the teacher, for the thesis. Every figure shows the PyTorch run and the Triton run side by side, with one panel for each stage. It needs a GPU (the Triton model runs its kernels) and matplotlib. No training.
+
+```bash
+make xai-curves       # optional: training losses from wandb, before make xai
+make xai              # 4 x compute (PyTorch and Triton, stage 1 and stage 2), then plot
+make xai XAI_SEQUENCES=4 XAI_DIR=xai-4   # fewer held-out sequences (default 16), another folder
+```
+
+- `compute` loads the teacher and one checkpoint (downloaded by name from `hf_repo` if it is not in `checkpoints/`). It runs held-out Alpaca sequences: the examples after the first `num_examples` of the training shuffle, packed to `seq_len`. Each Lizard layer gets the input of the same teacher layer. For each layer it saves:
+  - the relative MSE of the layer output against the teacher output (the stage 1 target), for query positions 0-127, 128-511, 512-1023, 1024-2047 and all;
+  - for each head, the attention weights against the teacher. The Lizard weights are `A_gla + alpha * A_window`, with each row normalized. The metrics are the total variation (TV) distance, the mass outside the window for the teacher and for Lizard, and the share of the window branch;
+  - the mean gate, the median gate memory `1 / (1 - gamma)` in tokens, `alpha` and the mean sink logit;
+  - the first 256 x 256 attention weights of the teacher and of Lizard for `--maps` (default `2:0 8:5 15:14`, layer:head).
+
+  The weights are rebuilt with the PyTorch functions. A check compares `A @ v` with the layer output (`weights_check`, near 1e-6).
+- `compute` also writes the three JSON formats of the XAI scripts of lizard-in-lolcats to `XAI_DIR/thesis/` (`xai-layer-wise-mse/`, `xai-position-mse/`, `xai-branch-fit/`), with the same definitions. The thesis plots read these files, so its figures can show the LoLCATs runs and these runs side by side:
+  - the MSE of the attention output before `o_proj`, against the teacher softmax attention with RoPE, for each layer and head, also for the query positions 0-127, 128-511 and 512-2047. 1000 x the mean over the layers is the `loss` (the scale of the lolcats stage 1 loss);
+  - the branch fit: for each head and position range, the least-squares weights of the gated branch G, the window branch W (without alpha) and an oracle WR (softmax with RoPE over the window, without sinks) that best give the teacher output, and the remaining error. `trained` is the error of the checkpoint output itself.
+
+  The default of 16 sequences of 2048 tokens (32,768 tokens) is the size of the lolcats validation data of these scripts. The data are not the same: lolcats used its validation split, this script the held-out examples.
+- `weights` (`make xai-weights`) writes the attention weight crops of one checkpoint in the format of `scripts/attention_weights.py` of lizard-in-lolcats, to `XAI_DIR/weights/`. It uses the same sample: the first 200 examples of Alpaca-cleaned with the LoLCATs prompt template, packed to 1024 tokens. Each crop is the last 32 queries against the first and the last 32 keys, for layers 0, 4, 8, 12 and 15 and heads 0-3, for the teacher, Lizard (`A_gla + alpha * A_window`) and the gated branch. Thus one figure can show the teacher and the checkpoints of both pipelines on the same text.
+- `curves` reads the stage 1 and stage 2 losses of the four runs from wandb.
+- `plot` writes these files to `XAI_DIR` (default `xai/`):
+
+| File | Contents |
+|---|---|
+| `layer_mse.png` | Relative MSE of each layer |
+| `position_mse.png` | Relative MSE by query position, mean over layers |
+| `attention_tv.png` | TV distance of the attention weights to the teacher, for each layer |
+| `position_tv.png` | TV distance by query position |
+| `window_share.png` | Share of the window branch in the Lizard weights, for each layer |
+| `gate_memory.png` | Median gate memory of each layer, in tokens |
+| `attention_maps.png` | Attention weights of the teacher and of the stage 2 models |
+| `branch_fit.png` | Branch fit at positions 0-127, one panel for each checkpoint |
+| `evaluation.png` | Table 9: teacher, PyTorch and Triton models, and Lizard in the paper (from the `make evaluate` JSON files) |
+| `training_loss.png` | Training loss of both stages (after `make xai-curves`) |
+| `xai.md` | All numbers as Markdown tables |
+
+The make variables `TORCH_STAGE1`, `TORCH_STAGE2`, `TRITON_STAGE1` and `TRITON_STAGE2` name the runs. Their defaults are the runs of the thesis. The two stage 2 checkpoints need approximately 5.2 GB of disk space.
+
 #### Checks before training
 
 `make train` first runs `make check` (`src/check.py`), and stops if one check fails. The checks are:
@@ -106,7 +150,7 @@ Without make: `python src/train.py configs/lizard-1b.yaml --stage stage2 --stage
 
 #### Evaluation
 
-`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>-all.json`. Set `eval_limit` in the config for a quick run on a few questions per task. `make mmlu-fast` runs only MMLU 5-shot on the first 5 test questions of each of the 57 subjects (285 questions), as `./eval.sh --limit 5` in lolcats, and saves `<config name>-eval-<model>-mmlu-fast.json`.
+`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>-all.json`. Set `eval_limit` in the config for a quick run on a few questions per task. `make mmlu-fast` runs only MMLU 5-shot on the first 5 test questions of each of the 57 subjects (285 questions), as `./eval.sh --limit 5` in lolcats, and saves `<config name>-eval-<model>-mmlu-fast.json`. `make mmlu` runs only the full MMLU (`--tasks mmlu`). Each JSON also has `mmlu_letters`: how often the model chose A, B, C and D (`pred`), and how often each letter is the right answer (`gold`).
 
 #### Evaluate a given checkpoint
 
@@ -129,6 +173,7 @@ A stage 1 checkpoint has only the Lizard parameters. They go into the original m
 - `src/lizard_attention.py`: the Lizard attention layer
 - `src/kernels/`: Triton kernels of the gated branch (`gla.py`) and the window branch (`swa.py`)
 - `src/benchmark.py`: latency of the GLA kernel against flash-linear-attention
+- `src/xai.py`: XAI figures of checkpoints against the teacher
 - `src/check.py`: checks of Hugging Face and wandb before training
 - `src/train.py`: stage 1 and stage 2 training
 - `src/evaluate.py`: lm-eval benchmarks of the paper
@@ -136,4 +181,5 @@ A stage 1 checkpoint has only the Lizard parameters. They go into the original m
 - `tests/test_evaluate.py`: tests of the scoring rules
 - `tests/test_config.py`: tests of the config loader
 - `tests/test_check.py`: tests of the checks before training
+- `tests/test_xai.py`: the XAI metrics and figures with a tiny model
 - `tests/test_kernels.py`: the Triton kernels against the PyTorch implementation

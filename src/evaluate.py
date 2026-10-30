@@ -11,6 +11,7 @@ import config
 from train import fetch, is_lizard, load_llama, to_lizard
 
 FAST_MMLU_LIMIT = 5
+LETTERS = "ABCD"
 ZERO_SHOT = {"piqa": "acc", "arc_easy": "acc", "arc_challenge": "acc_norm",
              "hellaswag": "acc_norm", "winogrande": "acc"}
 PAPER = {
@@ -53,24 +54,38 @@ def summarize(results, subjects):
     return scores
 
 
+def letters(samples):
+    counts = {"pred": dict.fromkeys(LETTERS, 0),
+              "gold": dict.fromkeys(LETTERS, 0)}
+    for task, rows in samples.items():
+        if not task.startswith("mmlu_"):
+            continue
+        for row in rows:
+            scores = [float(r[0]) for r in row["filtered_resps"]]
+            counts["pred"][LETTERS[scores.index(max(scores))]] += 1
+            counts["gold"][LETTERS[int(row["target"])]] += 1
+    return counts
+
+
 def run_mmlu(lm, limit):
     out = simple_evaluate(model=lm, tasks=["mmlu"], num_fewshot=5,
-                          limit=limit)
+                          limit=limit, log_samples=True)
     subjects = [t for t in out["configs"] if t.startswith("mmlu_")]
-    return out["results"], subjects
+    return out["results"], subjects, letters(out["samples"])
 
 
 def main(cfg, which, tasks, checkpoint=None):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     lm = HFLM(pretrained=load(cfg, which, checkpoint), tokenizer=tokenizer,
               batch_size=cfg.eval_batch_size, add_bos_token=False)
-    if tasks == "mmlu-fast":
-        results, subjects = run_mmlu(lm, FAST_MMLU_LIMIT)
+    if tasks in ("mmlu-fast", "mmlu"):
+        limit = FAST_MMLU_LIMIT if tasks == "mmlu-fast" else cfg.eval_limit
+        results, subjects, counts = run_mmlu(lm, limit)
         scores = {"mmlu": mmlu_score(results, subjects)}
     else:
         zero = simple_evaluate(model=lm, tasks=list(ZERO_SHOT),
                                num_fewshot=0, limit=cfg.eval_limit)
-        results, subjects = run_mmlu(lm, cfg.eval_limit)
+        results, subjects, counts = run_mmlu(lm, cfg.eval_limit)
         results = {**zero["results"], **results}
         scores = summarize(results, subjects)
     print(f"{'task':<15}{which:>8}{'paper':>8}{'teacher':>9}")
@@ -81,8 +96,8 @@ def main(cfg, which, tasks, checkpoint=None):
     base = checkpoint.stem if checkpoint else cfg.name
     name = f"{base}-eval-{which}-{tasks}.json"
     with open(cfg.out_dir / name, "w") as f:
-        json.dump({"scores": scores, "results": results}, f, indent=2,
-                  default=str)
+        json.dump({"scores": scores, "mmlu_letters": counts,
+                   "results": results}, f, indent=2, default=str)
 
 
 if __name__ == "__main__":
@@ -90,7 +105,7 @@ if __name__ == "__main__":
     parser.add_argument("config")
     parser.add_argument("--model", choices=["lizard", "llama"],
                         default="lizard")
-    parser.add_argument("--tasks", choices=["all", "mmlu-fast"],
+    parser.add_argument("--tasks", choices=["all", "mmlu", "mmlu-fast"],
                         default="all")
     parser.add_argument("--checkpoint", type=Path)
     args = parser.parse_args()

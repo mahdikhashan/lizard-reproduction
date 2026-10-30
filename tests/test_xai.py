@@ -1,0 +1,174 @@
+import copy
+import json
+from dataclasses import replace
+
+import pytest
+import torch
+import transformers
+from transformers import LlamaForCausalLM
+
+import config
+import evaluate
+import train
+import xai
+from lizard_attention import from_llama
+from test_lizard import tiny_config
+
+LENGTH = 40
+
+
+def tiny_models(seed=0):
+    torch.manual_seed(seed)
+    teacher = LlamaForCausalLM(tiny_config(2)).eval()
+    student = copy.deepcopy(teacher)
+    for block in student.model.layers:
+        block.self_attn = from_llama(block.self_attn, student.config,
+                                     window=16, feature_dim=8)
+        with torch.no_grad():
+            block.self_attn.W_gamma.weight.normal_(0, 0.5)
+            block.self_attn.meta_tokens.normal_(0, 0.5)
+    return teacher, student.eval()
+
+
+def test_lizard_weights_reproduce_the_layer_output():
+    teacher, student = tiny_models()
+    ids = torch.randint(0, 100, (1, LENGTH))
+    found = xai.capture(teacher, ids)
+    with torch.no_grad():
+        stats = xai.layer_stats(student.model.layers[0].self_attn,
+                                teacher.model.layers[0].self_attn,
+                                *found[0], teacher.config, {(0, 1)}, 0)
+    assert stats["check"] < 1e-5
+    tv = stats["per_head"]["tv"]
+    assert tv.shape == (4, LENGTH) and (tv >= 0).all() and (tv <= 1).all()
+    assert set(stats["crops"]) == {"0:1"}
+
+
+def test_teacher_output_before_o_proj_gives_the_layer_output():
+    teacher, _ = tiny_models()
+    ids = torch.randint(0, 100, (1, LENGTH))
+    found = xai.capture(teacher, ids)
+    attn = teacher.model.layers[1].self_attn
+    x, rope, target = found[1]
+    with torch.no_grad():
+        q, k = xai.teacher_qk(attn, x, rope, teacher.config)
+        v = xai.heads(x, attn.v_proj, 2, q.shape[-1], 2)
+        y = xai.teacher_weights(q, k, slice(None)) @ v
+        out = attn.o_proj(y.transpose(1, 2).flatten(2))
+    assert ((out - target).norm() / target.norm()).item() < 1e-5
+
+
+def test_identical_weights_have_no_distance():
+    teacher = torch.rand(2, 6, 6).tril()
+    teacher = teacher / teacher.sum(-1, keepdim=True)
+    values, _ = xai.weight_metrics(teacher, teacher, torch.zeros_like(teacher),
+                                   torch.tensor(1.0), 3)
+    assert values["tv"].abs().max() < 1e-6
+    assert torch.allclose(values["teacher_outside"], values["lizard_outside"])
+    assert values["window_share"].abs().max() == 0
+
+
+@pytest.fixture
+def tiny_pipeline(monkeypatch):
+    teacher, student = tiny_models()
+    monkeypatch.setattr(train, "load_llama",
+                        lambda cfg: copy.deepcopy(teacher))
+    monkeypatch.setattr(evaluate, "load",
+                        lambda cfg, which, checkpoint: copy.deepcopy(student))
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
+                        lambda name: None)
+    monkeypatch.setattr(xai, "held_out", lambda tokenizer, cfg, n:
+                        torch.randint(0, 100, (n, LENGTH)))
+    cfg = config.load("configs/lizard-1b.yaml")
+    return replace(cfg, device="cpu",
+                   lizard=replace(cfg.lizard, window=16, feature_dim=8))
+
+
+def test_compute_and_plot_both_versions(tiny_pipeline, tmp_path):
+    paths = []
+    for label in ("PyTorch", "Triton"):
+        for stage in ("stage1", "stage2"):
+            out = tmp_path / f"{label}-{stage}.json"
+            xai.compute(tiny_pipeline, tmp_path / "x.pt", label, stage, out,
+                        2, {(1, 2)})
+            paths.append(out)
+    result = json.loads(paths[0].read_text())
+    assert result["spans"] == ["0-127", "all"]
+    thesis = tmp_path / "thesis"
+    layer_mse = json.loads(
+        (thesis / "xai-layer-wise-mse" / paths[0].name).read_text())
+    position = json.loads(
+        (thesis / "xai-position-mse" / paths[0].name).read_text())
+    fit = json.loads((thesis / "xai-branch-fit" / paths[0].name).read_text())
+    assert layer_mse["label"] == "PyTorch, stage 1"
+    assert layer_mse["data"]["tokens"] == 2 * LENGTH
+    assert fit["buckets"] == ["0\u201339", "all"]
+    for lm, pm, bf in zip(layer_mse["layers"], position["layers"],
+                          fit["layers"]):
+        assert lm["relative_mse"] == pytest.approx(
+            pm["buckets"][0]["relative_mse"])
+        all_fits = bf["fits"]["all"]
+        assert all_fits["trained"]["relative_error"] == pytest.approx(
+            lm["relative_mse"], rel=1e-6)
+        assert all_fits["G+W"]["relative_error"] <= \
+            all_fits["trained"]["relative_error"] + 1e-9
+        assert bf["check_relative_error"] < 1e-5
+    assert len(result["layers"]) == 2 and "1:2" in result["maps"]
+    scores = {t: 50.0 for t in xai.TASKS}
+    evals = []
+    for label in ("Teacher", "PyTorch", "Triton"):
+        path = tmp_path / f"{label}.json"
+        path.write_text(json.dumps({"scores": scores}))
+        evals.append(f"{label}={path}")
+    curves = tmp_path / "curves.json"
+    curves.write_text(json.dumps({"stage1": {
+        "PyTorch": {"run": "a", "runtime": 1, "loss": [3.0, 2.0]},
+        "Triton": {"run": "b", "runtime": 1, "loss": [3.1, 2.1]}}}))
+    figures = tmp_path / "figures"
+    xai.plot([str(p) for p in paths], evals, str(curves), figures)
+    names = {p.name for p in figures.iterdir()}
+    assert {"layer_mse.png", "position_mse.png", "attention_tv.png",
+            "position_tv.png", "window_share.png", "gate_memory.png",
+            "attention_maps.png", "branch_fit.png", "evaluation.png",
+            "training_loss.png", "xai.md"} <= names
+    assert "| Triton | stage2 |" in (figures / "xai.md").read_text()
+
+
+class FakeTokenizer:
+    eos_token = "</s>"
+
+    def encode(self, text, add_special_tokens=True):
+        return [1] * add_special_tokens + [len(w) % 90 + 2
+                                           for w in text.split()]
+
+
+def test_lolcats_sample_packs_the_templates(monkeypatch):
+    import datasets
+    rows = [{"instruction": "do it", "input": "", "output": "ok done"},
+            {"instruction": "add", "input": "1 2", "output": "3"}] * 100
+    monkeypatch.setattr(datasets, "load_dataset",
+                        lambda name, split: datasets.Dataset.from_list(rows))
+    cfg = config.load("configs/lizard-1b.yaml")
+    ids = xai.lolcats_sample(FakeTokenizer(), cfg, 64)
+    tokens = FakeTokenizer()
+    first = tokens.encode(xai.PROMPTS[False].format_map(rows[0]))
+    first += tokens.encode("ok done</s>", add_special_tokens=False)
+    assert ids.shape == (1, 64) and ids[0, :len(first)].tolist() == first
+    assert ids[0, len(first)].item() == 1
+
+
+def test_weights_write_the_lolcats_format(tiny_pipeline, tmp_path,
+                                          monkeypatch):
+    monkeypatch.setattr(xai, "lolcats_sample", lambda tokenizer, cfg, n:
+                        torch.randint(0, 100, (1, n)))
+    out = tmp_path / "w.json"
+    result = xai.weights(tiny_pipeline, tmp_path / "x.pt", "PyTorch",
+                         "stage2", out, 64, 8, [0, 1], [0, 3])
+    assert json.loads(out.read_text())["stage"] == 2
+    crop = result["crops"][0]["1"]["3"]
+    assert set(crop) == {"teacher", "lizard", "gla"}
+    assert len(crop["teacher"]) == 8 and len(crop["teacher"][0]) == 16
+    assert all(v >= 0 for row in crop["gla"] for v in row)
+    layer = result["layers"][0]
+    assert len(layer["tv_distance"]) == 4
+    assert all(0 <= v <= 1 for v in layer["tv_distance"])
