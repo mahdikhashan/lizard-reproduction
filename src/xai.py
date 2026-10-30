@@ -19,9 +19,11 @@ CANDIDATES = {"G": "gated branch",
               "WR": "oracle: softmax with RoPE over the window, without sinks"}
 SETS = {"G": [1], "W": [2], "WR": [3], "G+W": [1, 2], "G+WR": [1, 3],
         "W+WR": [2, 3], "G+W+WR": [1, 2, 3]}
-COLORS = {"PyTorch": "#2a78d6", "Triton": "#eb6834", "Teacher": "#1baf7a",
-          "Paper": "#eda100"}
-INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
+COLORS = {"PyTorch": "#046E98", "Triton": "#3A9DD6", "Teacher": "#5A5A5A",
+          "Paper": "#808288"}
+INK, MUTED, GRID, SURFACE = "#000000", "#5A5A5A", "#E3E4E6", "#FFFFFF"
+RAMP = ["#FFFFFF", "#D1E2EA", "#A3C6D4", "#75A9BF", "#468DA9", "#046E98",
+        "#03526F", "#012A3B"]
 TASKS = ["piqa", "arc_easy", "arc_challenge", "hellaswag", "winogrande",
          "avg", "mmlu"]
 TASK_NAMES = ["PIQA", "ARC-e", "ARC-c", "HellaSwag", "WinoGrande", "Avg.",
@@ -509,13 +511,18 @@ def curves(runs, out, project):
     print(f"wrote {out}")
 
 
+def ramp():
+    from matplotlib.colors import LinearSegmentedColormap
+    return LinearSegmentedColormap.from_list("jkublue", RAMP)
+
+
 def style(ax):
     ax.grid(True, color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
-        ax.spines[side].set_color("#c3c2b7")
+        ax.spines[side].set_color("#B3B4B8")
     ax.tick_params(colors=MUTED, labelsize=9)
 
 
@@ -528,9 +535,9 @@ def by_stage(results):
 
 def figure(plt, panels, width=6.0, height=4.0):
     fig, axes = plt.subplots(1, panels, figsize=(width * panels, height),
-                             squeeze=False, facecolor="#fcfcfb")
+                             squeeze=False, facecolor=SURFACE)
     for ax in axes[0]:
-        ax.set_facecolor("#fcfcfb")
+        ax.set_facecolor(SURFACE)
         style(ax)
     return fig, axes[0]
 
@@ -598,11 +605,11 @@ def plot_maps(plt, results, out):
               "lizard") for r in results]
     fig, axes = plt.subplots(len(rows), len(keys),
                              figsize=(3.2 * len(keys), 3.0 * len(rows)),
-                             squeeze=False, facecolor="#fcfcfb")
+                             squeeze=False, facecolor=SURFACE)
     for c, key in enumerate(keys):
         for r_i, (name, r, part) in enumerate(rows):
             ax = axes[r_i][c]
-            ax.imshow(r["maps"][key][part], cmap="Blues",
+            ax.imshow(r["maps"][key][part], cmap=ramp(),
                       norm=PowerNorm(0.4, vmin=0, vmax=1))
             ax.set_xticks([])
             ax.set_yticks([])
@@ -628,11 +635,11 @@ def plot_branch_fit(plt, paths, out):
     bucket = found[0]["buckets"][0]
     norm = LogNorm(vmin=1e-3, vmax=1.0, clip=True)
     fig, axes = plt.subplots(1, len(found), figsize=(3.4 * len(found), 5.2),
-                             squeeze=False, facecolor="#fcfcfb")
+                             squeeze=False, facecolor=SURFACE)
     for ax, d in zip(axes[0], found):
         m = [[layer["fits"][bucket][s]["relative_error"] for s in sets]
              for layer in d["layers"]]
-        ax.imshow(m, cmap="Blues", norm=norm, aspect="auto")
+        ax.imshow(m, cmap=ramp(), norm=norm, aspect="auto")
         for i, row in enumerate(m):
             for j, v in enumerate(row):
                 ax.text(j, i, f"{v:.2g}" if v >= 1e-3 else "<.001",
