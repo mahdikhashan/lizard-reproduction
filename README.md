@@ -104,6 +104,7 @@ make xai XAI_SEQUENCES=4 XAI_DIR=xai-4   # fewer held-out sequences (default 16)
   - the branch fit: for each head and position range, the least-squares weights of the gated branch G, the window branch W (without alpha) and an oracle WR (softmax with RoPE over the window, without sinks) that best give the teacher output, and the remaining error. `trained` is the error of the checkpoint output itself.
 
   The default of 16 sequences of 2048 tokens (32,768 tokens) is the size of the lolcats validation data of these scripts. The data are not the same: lolcats used its validation split, this script the held-out examples.
+- `weights` (`make xai-weights`) writes the attention weight crops of one checkpoint in the format of `scripts/attention_weights.py` of lizard-in-lolcats, to `XAI_DIR/weights/`. It uses the same sample: the first 200 examples of Alpaca-cleaned with the LoLCATs prompt template, packed to 1024 tokens. Each crop is the last 32 queries against the first and the last 32 keys, for layers 0, 4, 8, 12 and 15 and heads 0-3, for the teacher, Lizard (`A_gla + alpha * A_window`) and the gated branch. Thus one figure can show the teacher and the checkpoints of both pipelines on the same text.
 - `curves` reads the stage 1 and stage 2 losses of the four runs from wandb.
 - `plot` writes these files to `XAI_DIR` (default `xai/`):
 

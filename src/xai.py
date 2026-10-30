@@ -38,6 +38,30 @@ def span_slices(length):
     return slices + [slice(0, length)]
 
 
+PROMPTS = {
+    True: ("Below is an instruction that describes a task, paired with an "
+           "input that provides further context. Write a response that "
+           "appropriately completes the request.\n\n### Instruction:\n"
+           "{instruction}\n\n### Input:\n{input}\n\n### Response:\n"),
+    False: ("Below is an instruction that describes a task. Write a response "
+            "that appropriately completes the request.\n\n"
+            "### Instruction:\n{instruction}\n\n### Response:\n")}
+
+
+def lolcats_sample(tokenizer, cfg, length):
+    from datasets import load_dataset
+    data = load_dataset(cfg.dataset_name, split="train").select(range(200))
+    ids = []
+    for e in data:
+        prompt = PROMPTS[e["input"] != ""].format_map(e)
+        ids += tokenizer.encode(prompt, add_special_tokens=True)
+        ids += tokenizer.encode(f"{e['output']}{tokenizer.eos_token}",
+                                add_special_tokens=False)
+        if len(ids) > length:
+            return torch.tensor(ids[:length])[None]
+    raise ValueError(f"the sample has fewer than {length} tokens")
+
+
 def held_out(tokenizer, cfg, sequences):
     from datasets import load_dataset
 
@@ -378,6 +402,93 @@ def thesis_results(acc, cfg, label, stage, checkpoint, sequences, length):
             "layers": fits}}
 
 
+def crop(weights, queries):
+    n = weights.shape[-1]
+    cols = torch.cat([torch.arange(queries),
+                      torch.arange(n - queries, n)]).to(weights.device)
+    return weights[..., n - queries:, :][..., cols]
+
+
+def head_metrics(teacher, lizard, window, alpha, size):
+    n = teacher.shape[-1]
+    i = torch.arange(n, device=teacher.device)
+    outside = i[None, :] <= i[:, None] - size
+    rows = slice(size, n)
+    row_sum = lizard.sum(-1)
+    normalized = lizard / row_sum[..., None]
+    out = {}
+    for name, t, l in (("first_key", teacher[..., 0], lizard[..., 0]),
+                       ("outside_window", (teacher * outside).sum(-1),
+                        (lizard * outside).sum(-1))):
+        out[f"teacher_{name}"] = t[..., rows].mean(dim=(0, 2)).tolist()
+        out[f"lizard_{name}"] = l[..., rows].mean(dim=(0, 2)).tolist()
+    tv = 0.5 * (teacher - normalized).abs().sum(-1)
+    out["tv_distance"] = tv[..., rows].mean(dim=(0, 2)).tolist()
+    out["row_sum"] = row_sum[..., rows].mean(dim=(0, 2)).tolist()
+    mass = window.sum(-1)
+    out["window_share"] = (alpha * mass / row_sum)[..., rows] \
+        .mean(dim=(0, 2)).tolist()
+    out["window_sink_mass"] = (1 - mass)[..., rows].mean(dim=(0, 2)).tolist()
+    return out
+
+
+def weights(cfg, checkpoint, label, stage, out, length, queries, layers,
+            crop_heads):
+    from transformers import AutoTokenizer
+
+    from evaluate import load
+    from train import load_llama
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+    teacher = load_llama(cfg).eval()
+    model = load(cfg, "lizard", checkpoint)
+    ids = lolcats_sample(tokenizer, cfg, length).to(cfg.device)
+    found = capture(teacher, ids)
+    per_layer, crops = [], {}
+    with torch.no_grad():
+        for i, block in enumerate(model.model.layers):
+            attn = block.self_attn
+            x, rope, _ = found[i]
+            p = lizard_parts(attn, x, rope)
+            q, k = teacher_qk(teacher.model.layers[i].self_attn, x, rope,
+                              teacher.config)
+            parts = []
+            for start in range(0, q.shape[1], HEAD_GROUP):
+                h = slice(start, start + HEAD_GROUP)
+                gated, window = lizard_weights(p, h)
+                lizard = gated + p["alpha"] * window
+                t = teacher_weights(q, k, h)
+                parts.append(head_metrics(t, lizard, window, p["alpha"],
+                                          p["window"]))
+                if i in layers:
+                    for head in crop_heads:
+                        if start <= head < start + HEAD_GROUP:
+                            j = head - start
+                            crops.setdefault(str(i), {})[str(head)] = {
+                                "teacher": rounded(crop(t, queries)[0, j]),
+                                "lizard": rounded(crop(lizard, queries)[0, j]),
+                                "gla": rounded(crop(gated, queries)[0, j])}
+            per_layer.append({"layer": i, "alpha": p["alpha"].item(),
+                              **{key: sum((m[key] for m in parts), [])
+                                 for key in parts[0]}})
+            print(f"layer {i}: TV distance "
+                  f"{mean(per_layer[-1]['tv_distance']):.3f}")
+    result = {"label": label, "stage": int(stage[-1]),
+              "config": cfg.name, "backend": cfg.lizard.backend,
+              "torch_dtype": cfg.dtype,
+              "checkpoints": {"path": str(checkpoint)},
+              "data": {"split": "validation (first 200 Alpaca-cleaned "
+                       "examples, LoLCATs template)", "seq_len": length,
+                       "samples": 1},
+              "window": cfg.lizard.window, "queries": queries,
+              "n_layers": len(per_layer), "n_heads": q.shape[1],
+              "crop_layers": layers, "crop_heads": crop_heads,
+              "layers": per_layer, "crops": [crops]}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result))
+    print(f"wrote {out}")
+    return result
+
+
 def curves(runs, out, project):
     import wandb
     api = wandb.Api()
@@ -695,6 +806,17 @@ if __name__ == "__main__":
     c.add_argument("--sequences", type=int, default=16)
     c.add_argument("--maps", nargs="*", default=["2:0", "8:5", "15:14"],
                    help="layer:head pairs for the attention maps")
+    a = sub.add_parser("weights", help="attention weight crops in the "
+                       "format of lolcats' scripts/attention_weights.py")
+    a.add_argument("config")
+    a.add_argument("--checkpoint", required=True, type=Path)
+    a.add_argument("--label", required=True)
+    a.add_argument("--stage", required=True, choices=["stage1", "stage2"])
+    a.add_argument("--out", required=True, type=Path)
+    a.add_argument("--seq-len", type=int, default=1024)
+    a.add_argument("--queries", type=int, default=32)
+    a.add_argument("--layers", type=int, nargs="+", default=[0, 4, 8, 12, 15])
+    a.add_argument("--heads", type=int, nargs="+", default=[0, 1, 2, 3])
     w = sub.add_parser("curves", help="training losses from wandb")
     w.add_argument("out", type=Path)
     w.add_argument("--runs", nargs="+", required=True,
@@ -710,6 +832,10 @@ if __name__ == "__main__":
     if args.command == "compute":
         compute(config.load(args.config), args.checkpoint, args.label,
                 args.stage, args.out, args.sequences, parse_maps(args.maps))
+    elif args.command == "weights":
+        weights(config.load(args.config), args.checkpoint, args.label,
+                args.stage, args.out, args.seq_len, args.queries, args.layers,
+                args.heads)
     elif args.command == "curves":
         curves(args.runs, args.out, args.project)
     else:

@@ -132,3 +132,43 @@ def test_compute_and_plot_both_versions(tiny_pipeline, tmp_path):
             "attention_maps.png", "branch_fit.png", "evaluation.png",
             "training_loss.png", "xai.md"} <= names
     assert "| Triton | stage2 |" in (figures / "xai.md").read_text()
+
+
+class FakeTokenizer:
+    eos_token = "</s>"
+
+    def encode(self, text, add_special_tokens=True):
+        return [1] * add_special_tokens + [len(w) % 90 + 2
+                                           for w in text.split()]
+
+
+def test_lolcats_sample_packs_the_templates(monkeypatch):
+    import datasets
+    rows = [{"instruction": "do it", "input": "", "output": "ok done"},
+            {"instruction": "add", "input": "1 2", "output": "3"}] * 100
+    monkeypatch.setattr(datasets, "load_dataset",
+                        lambda name, split: datasets.Dataset.from_list(rows))
+    cfg = config.load("configs/lizard-1b.yaml")
+    ids = xai.lolcats_sample(FakeTokenizer(), cfg, 64)
+    tokens = FakeTokenizer()
+    first = tokens.encode(xai.PROMPTS[False].format_map(rows[0]))
+    first += tokens.encode("ok done</s>", add_special_tokens=False)
+    assert ids.shape == (1, 64) and ids[0, :len(first)].tolist() == first
+    assert ids[0, len(first)].item() == 1
+
+
+def test_weights_write_the_lolcats_format(tiny_pipeline, tmp_path,
+                                          monkeypatch):
+    monkeypatch.setattr(xai, "lolcats_sample", lambda tokenizer, cfg, n:
+                        torch.randint(0, 100, (1, n)))
+    out = tmp_path / "w.json"
+    result = xai.weights(tiny_pipeline, tmp_path / "x.pt", "PyTorch",
+                         "stage2", out, 64, 8, [0, 1], [0, 3])
+    assert json.loads(out.read_text())["stage"] == 2
+    crop = result["crops"][0]["1"]["3"]
+    assert set(crop) == {"teacher", "lizard", "gla"}
+    assert len(crop["teacher"]) == 8 and len(crop["teacher"][0]) == 16
+    assert all(v >= 0 for row in crop["gla"] for v in row)
+    layer = result["layers"][0]
+    assert len(layer["tv_distance"]) == 4
+    assert all(0 <= v <= 1 for v in layer["tv_distance"])
