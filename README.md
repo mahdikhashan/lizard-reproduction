@@ -27,6 +27,7 @@ make benchmark       # latency of the GLA kernel against flash-linear-attention,
 make xai             # XAI figures of the PyTorch and the Triton checkpoints against the teacher
 make evaluate        # paper metrics (Table 9) for the trained Lizard model
 make evaluate-llama  # the same metrics for the original model
+make mmlu            # only the full MMLU 5-shot, with the counts of the answer letters
 make mmlu-fast       # quick MMLU 5-shot, 5 questions per subject (MODEL=llama for the original model)
 make mmlu-fast CKPT=checkpoints/<run>-stage1.pt  # the same on a given checkpoint
 make push            # upload the code and the config to Hugging Face
@@ -88,7 +89,7 @@ The times are medians of `triton.testing.do_bench`. A shape that does not fit in
 ```bash
 make xai-curves       # optional: training losses from wandb, before make xai
 make xai              # 4 x compute (PyTorch and Triton, stage 1 and stage 2), then plot
-make xai XAI_SEQUENCES=8 XAI_DIR=xai-8   # more held-out sequences, another folder
+make xai XAI_SEQUENCES=4 XAI_DIR=xai-4   # fewer held-out sequences (default 16), another folder
 ```
 
 - `compute` loads the teacher and one checkpoint (downloaded by name from `hf_repo` if it is not in `checkpoints/`). It runs held-out Alpaca sequences: the examples after the first `num_examples` of the training shuffle, packed to `seq_len`. Each Lizard layer gets the input of the same teacher layer. For each layer it saves:
@@ -98,6 +99,11 @@ make xai XAI_SEQUENCES=8 XAI_DIR=xai-8   # more held-out sequences, another fold
   - the first 256 x 256 attention weights of the teacher and of Lizard for `--maps` (default `2:0 8:5 15:14`, layer:head).
 
   The weights are rebuilt with the PyTorch functions. A check compares `A @ v` with the layer output (`weights_check`, near 1e-6).
+- `compute` also writes the three JSON formats of the XAI scripts of lizard-in-lolcats to `XAI_DIR/thesis/` (`xai-layer-wise-mse/`, `xai-position-mse/`, `xai-branch-fit/`), with the same definitions. The thesis plots read these files, so its figures can show the LoLCATs runs and these runs side by side:
+  - the MSE of the attention output before `o_proj`, against the teacher softmax attention with RoPE, for each layer and head, also for the query positions 0-127, 128-511 and 512-2047. 1000 x the mean over the layers is the `loss` (the scale of the lolcats stage 1 loss);
+  - the branch fit: for each head and position range, the least-squares weights of the gated branch G, the window branch W (without alpha) and an oracle WR (softmax with RoPE over the window, without sinks) that best give the teacher output, and the remaining error. `trained` is the error of the checkpoint output itself.
+
+  The default of 16 sequences of 2048 tokens (32,768 tokens) is the size of the lolcats validation data of these scripts. The data are not the same: lolcats used its validation split, this script the held-out examples.
 - `curves` reads the stage 1 and stage 2 losses of the four runs from wandb.
 - `plot` writes these files to `XAI_DIR` (default `xai/`):
 
@@ -110,6 +116,7 @@ make xai XAI_SEQUENCES=8 XAI_DIR=xai-8   # more held-out sequences, another fold
 | `window_share.png` | Share of the window branch in the Lizard weights, for each layer |
 | `gate_memory.png` | Median gate memory of each layer, in tokens |
 | `attention_maps.png` | Attention weights of the teacher and of the stage 2 models |
+| `branch_fit.png` | Branch fit at positions 0-127, one panel for each checkpoint |
 | `evaluation.png` | Table 9: teacher, PyTorch and Triton models, and Lizard in the paper (from the `make evaluate` JSON files) |
 | `training_loss.png` | Training loss of both stages (after `make xai-curves`) |
 | `xai.md` | All numbers as Markdown tables |
@@ -142,7 +149,7 @@ Without make: `python src/train.py configs/lizard-1b.yaml --stage stage2 --stage
 
 #### Evaluation
 
-`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>-all.json`. Set `eval_limit` in the config for a quick run on a few questions per task. `make mmlu-fast` runs only MMLU 5-shot on the first 5 test questions of each of the 57 subjects (285 questions), as `./eval.sh --limit 5` in lolcats, and saves `<config name>-eval-<model>-mmlu-fast.json`.
+`src/evaluate.py` runs LM Evaluation Harness with the metrics of Table 9 of the paper: PIQA (acc), ARC-Easy (acc), ARC-Challenge (acc_norm), HellaSwag (acc_norm) and WinoGrande (acc) zero-shot, and MMLU 5-shot. As in lolcats, MMLU is the unweighted mean over its 57 subjects, the prompts have no BOS token, and Avg. is the mean of the five zero-shot tasks. It prints the scores next to the paper values and saves them to `<out_dir>/<config name>-eval-<model>-all.json`. Set `eval_limit` in the config for a quick run on a few questions per task. `make mmlu-fast` runs only MMLU 5-shot on the first 5 test questions of each of the 57 subjects (285 questions), as `./eval.sh --limit 5` in lolcats, and saves `<config name>-eval-<model>-mmlu-fast.json`. `make mmlu` runs only the full MMLU (`--tasks mmlu`). Each JSON also has `mmlu_letters`: how often the model chose A, B, C and D (`pred`), and how often each letter is the right answer (`gold`).
 
 #### Evaluate a given checkpoint
 

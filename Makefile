@@ -5,7 +5,7 @@ STAGE ?= both
 MODEL ?= lizard
 STAGE1_CKPT ?=
 XAI_DIR ?= xai
-XAI_SEQUENCES ?= 4
+XAI_SEQUENCES ?= 16
 TORCH_STAGE1 ?= lizard-1b-mse1000-20261024-232317
 TORCH_STAGE2 ?= lizard-1b-mse1000-20261025-023701
 TRITON_STAGE1 ?= lizard-1b-mse1000-triton-20261025-201733
@@ -13,7 +13,7 @@ TRITON_STAGE2 ?= lizard-1b-mse1000-triton-20261025-223935
 XAI_COMPUTE = $(PYTHON) src/xai.py compute --sequences $(XAI_SEQUENCES)
 CKPT ?=
 
-.PHONY: env test test-kernels check train train-kernel benchmark evaluate evaluate-llama mmlu-fast push xai xai-compute xai-curves xai-plot
+.PHONY: env test test-kernels check train train-kernel benchmark evaluate evaluate-llama mmlu mmlu-fast push xai xai-compute xai-curves xai-plot
 
 env:
 	conda env create -f envs/distill_lizard_llama_3_2_1B.yaml
@@ -42,6 +42,9 @@ evaluate:
 
 evaluate-llama:
 	$(PYTHON) src/evaluate.py $(CONFIG) --model llama
+
+mmlu:
+	$(PYTHON) src/evaluate.py $(CONFIG) --model $(MODEL) --tasks mmlu $(if $(CKPT),--checkpoint $(CKPT))
 
 mmlu-fast:
 	$(PYTHON) src/evaluate.py $(CONFIG) --model $(MODEL) --tasks mmlu-fast $(if $(CKPT),--checkpoint $(CKPT))

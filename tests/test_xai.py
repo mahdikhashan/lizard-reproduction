@@ -44,6 +44,20 @@ def test_lizard_weights_reproduce_the_layer_output():
     assert set(stats["crops"]) == {"0:1"}
 
 
+def test_teacher_output_before_o_proj_gives_the_layer_output():
+    teacher, _ = tiny_models()
+    ids = torch.randint(0, 100, (1, LENGTH))
+    found = xai.capture(teacher, ids)
+    attn = teacher.model.layers[1].self_attn
+    x, rope, target = found[1]
+    with torch.no_grad():
+        q, k = xai.teacher_qk(attn, x, rope, teacher.config)
+        v = xai.heads(x, attn.v_proj, 2, q.shape[-1], 2)
+        y = xai.teacher_weights(q, k, slice(None)) @ v
+        out = attn.o_proj(y.transpose(1, 2).flatten(2))
+    assert ((out - target).norm() / target.norm()).item() < 1e-5
+
+
 def test_identical_weights_have_no_distance():
     teacher = torch.rand(2, 6, 6).tril()
     teacher = teacher / teacher.sum(-1, keepdim=True)
@@ -80,6 +94,25 @@ def test_compute_and_plot_both_versions(tiny_pipeline, tmp_path):
             paths.append(out)
     result = json.loads(paths[0].read_text())
     assert result["spans"] == ["0-127", "all"]
+    thesis = tmp_path / "thesis"
+    layer_mse = json.loads(
+        (thesis / "xai-layer-wise-mse" / paths[0].name).read_text())
+    position = json.loads(
+        (thesis / "xai-position-mse" / paths[0].name).read_text())
+    fit = json.loads((thesis / "xai-branch-fit" / paths[0].name).read_text())
+    assert layer_mse["label"] == "PyTorch, stage 1"
+    assert layer_mse["data"]["tokens"] == 2 * LENGTH
+    assert fit["buckets"] == ["0\u201339", "all"]
+    for lm, pm, bf in zip(layer_mse["layers"], position["layers"],
+                          fit["layers"]):
+        assert lm["relative_mse"] == pytest.approx(
+            pm["buckets"][0]["relative_mse"])
+        all_fits = bf["fits"]["all"]
+        assert all_fits["trained"]["relative_error"] == pytest.approx(
+            lm["relative_mse"], rel=1e-6)
+        assert all_fits["G+W"]["relative_error"] <= \
+            all_fits["trained"]["relative_error"] + 1e-9
+        assert bf["check_relative_error"] < 1e-5
     assert len(result["layers"]) == 2 and "1:2" in result["maps"]
     scores = {t: 50.0 for t in xai.TASKS}
     evals = []
@@ -96,6 +129,6 @@ def test_compute_and_plot_both_versions(tiny_pipeline, tmp_path):
     names = {p.name for p in figures.iterdir()}
     assert {"layer_mse.png", "position_mse.png", "attention_tv.png",
             "position_tv.png", "window_share.png", "gate_memory.png",
-            "attention_maps.png", "evaluation.png", "training_loss.png",
-            "xai.md"} <= names
+            "attention_maps.png", "branch_fit.png", "evaluation.png",
+            "training_loss.png", "xai.md"} <= names
     assert "| Triton | stage2 |" in (figures / "xai.md").read_text()

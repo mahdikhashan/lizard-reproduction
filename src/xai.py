@@ -13,6 +13,12 @@ SPANS = [(0, 128), (128, 512), (512, 1024), (1024, 2048)]
 HEAD_GROUP = 8
 MAP_SIZE = 256
 METRICS = ("tv", "teacher_outside", "lizard_outside", "window_share")
+EDGES = (0, 128, 512)
+CANDIDATES = {"G": "gated branch",
+              "W": "window branch of the checkpoint, without alpha",
+              "WR": "oracle: softmax with RoPE over the window, without sinks"}
+SETS = {"G": [1], "W": [2], "WR": [3], "G+W": [1, 2], "G+WR": [1, 3],
+        "W+WR": [2, 3], "G+W+WR": [1, 2, 3]}
 COLORS = {"PyTorch": "#2a78d6", "Triton": "#eb6834", "Teacher": "#1baf7a",
           "Paper": "#eda100"}
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e4e3df"
@@ -127,6 +133,40 @@ def rounded(t):
     return [[float(f"{x:.4g}") for x in row] for row in t.tolist()]
 
 
+def bounds(length):
+    edges = sorted({min(e, length) for e in EDGES} | {length})
+    return list(zip(edges[:-1], edges[1:]))
+
+
+def bucket_names(length):
+    return [f"{lo}\u2013{hi - 1}" for lo, hi in bounds(length)] + ["all"]
+
+
+def window_rope(p, h):
+    s = p["qr"][:, h] @ p["kr"][:, h].transpose(-1, -2)
+    s = s / math.sqrt(p["qr"].shape[-1])
+    mask = lz.window_mask(s.shape[-1], p["window"], s.device)
+    return s.masked_fill(~mask, float("-inf")).softmax(-1) @ p["v"][:, h]
+
+
+def before_o_proj(teacher_v, y_true, p, output, length):
+    gated = lz.gla(p["fq"], p["fk"], p["v"], p["gamma"])
+    window = lz.awa(p["qr"], p["kr"], p["v"], p["meta"], p["window"])
+    oracle = torch.cat([window_rope(p, slice(i, i + HEAD_GROUP))
+                        for i in range(0, p["v"].shape[1], HEAD_GROUP)], 1)
+    stack = torch.stack([y_true, gated, window, oracle, output])[:, 0]
+    stack = stack.double()
+    error = (output - y_true)[0].double().pow(2)
+    target = y_true[0].double().pow(2)
+    grams, err, tsq = [], [], []
+    for lo, hi in bounds(length):
+        part = stack[:, :, lo:hi]
+        grams.append(torch.einsum("shld,thld->hst", part, part).cpu())
+        err.append(error[:, lo:hi].sum((1, 2)).cpu())
+        tsq.append(target[:, lo:hi].sum((1, 2)).cpu())
+    return torch.stack(grams), torch.stack(err), torch.stack(tsq)
+
+
 def layer_stats(attn, teacher_attn, x, rope, target, model_cfg, maps, layer):
     out = attn(x, rope)[0].float()
     err = (out - target.float()).pow(2).mean(-1)[0]
@@ -134,14 +174,19 @@ def layer_stats(attn, teacher_attn, x, rope, target, model_cfg, maps, layer):
     p = lizard_parts(attn, x, rope)
     q, k = teacher_qk(teacher_attn, x, rope, model_cfg)
     n_heads = q.shape[1]
+    kv = model_cfg.num_key_value_heads
+    teacher_v = heads(x, teacher_attn.v_proj, kv, q.shape[-1], n_heads // kv)
     sums = {m: [] for m in METRICS}
     crops = {}
     output = torch.zeros_like(p["v"])
+    y_true = torch.zeros_like(p["v"])
     for start in range(0, n_heads, HEAD_GROUP):
         h = slice(start, start + HEAD_GROUP)
         gated, window = lizard_weights(p, h)
         output[:, h] = (gated + p["alpha"] * window) @ p["v"][:, h]
-        values, lizard = weight_metrics(teacher_weights(q, k, h), gated,
+        weights = teacher_weights(q, k, h)
+        y_true[:, h] = weights @ teacher_v[:, h]
+        values, lizard = weight_metrics(weights, gated,
                                         window, p["alpha"], p["window"])
         for m in METRICS:
             sums[m].append(values[m][0])
@@ -149,8 +194,7 @@ def layer_stats(attn, teacher_attn, x, rope, target, model_cfg, maps, layer):
             if (layer, head) in maps:
                 j = head - start
                 crops[f"{layer}:{head}"] = {
-                    "teacher": rounded(teacher_weights(q, k, h)[0, j,
-                                       :MAP_SIZE, :MAP_SIZE]),
+                    "teacher": rounded(weights[0, j, :MAP_SIZE, :MAP_SIZE]),
                     "lizard": rounded(lizard[0, j, :MAP_SIZE, :MAP_SIZE])}
     reference = lz.gla(p["fq"], p["fk"], p["v"], p["gamma"])
     reference = reference + p["alpha"] * lz.awa(p["qr"], p["kr"], p["v"],
@@ -158,7 +202,11 @@ def layer_stats(attn, teacher_attn, x, rope, target, model_cfg, maps, layer):
     check = ((output - reference).norm() / reference.norm()).item()
     per_head = {m: torch.cat(v) for m, v in sums.items()}
     gamma = p["gamma"][0]
+    grams, head_err, head_tsq = before_o_proj(teacher_v, y_true, p, output,
+                                              x.shape[1])
     return dict(err=err, norm=norm, per_head=per_head, crops=crops,
+                grams=grams, head_err=head_err, head_tsq=head_tsq,
+                head_dim=q.shape[-1],
                 check=check, gamma_mean=gamma.mean().item(),
                 memory=(1 / (1 - gamma).clamp_min(1e-6)).median().item(),
                 alpha=p["alpha"].item(), meta=p["meta"].mean().item())
@@ -178,7 +226,8 @@ def compute(cfg, checkpoint, label, stage, out, sequences, maps):
     names = span_names(length)
     n_layers = len(teacher.model.layers)
     acc = [dict(err=[0.0] * len(names), norm=[0.0] * len(names),
-                per_head=None, check=0.0, gamma_mean=0.0, memory=0.0)
+                per_head=None, check=0.0, gamma_mean=0.0, memory=0.0,
+                grams=0, head_err=0, head_tsq=0)
            for _ in range(n_layers)]
     crops = {}
     for s, ids in enumerate(chunks):
@@ -202,9 +251,11 @@ def compute(cfg, checkpoint, label, stage, out, sequences, maps):
                     for m in METRICS:
                         a["per_head"][m] = [x + y for x, y in
                                             zip(a["per_head"][m], spans[m])]
-                for key in ("check", "gamma_mean", "memory"):
+                for key in ("check", "gamma_mean", "memory", "grams",
+                            "head_err", "head_tsq"):
                     a[key] += stats[key]
                 a["alpha"], a["meta"] = stats["alpha"], stats["meta"]
+                a["head_dim"] = stats["head_dim"]
                 crops.update(stats["crops"])
         print(f"sequence {s + 1}/{len(chunks)} done")
     layers = []
@@ -226,9 +277,105 @@ def compute(cfg, checkpoint, label, stage, out, sequences, maps):
               "spans": names, "layers": layers, "maps": crops}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result))
+    for kind, data in thesis_results(acc, cfg, label, stage, checkpoint,
+                                     len(chunks), length).items():
+        path = out.parent / "thesis" / kind / out.name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=1))
+        print(f"wrote {path}")
     worst = max(layer["weights_check"] for layer in layers)
     print(f"wrote {out}; largest weights check error {worst:.1e}")
     return result
+
+
+def solve(gram):
+    yy = gram[:, 0, 0]
+    fits = {}
+    for name, idx in SETS.items():
+        a = gram[:, idx][:, :, idx]
+        r = gram[:, idx, 0]
+        c = (torch.linalg.pinv(a, hermitian=True) @ r[..., None])[..., 0]
+        fits[name] = {"error": (yy - (c * r).sum(-1)).clamp_min(0),
+                      "weights": c}
+    trained = yy - 2 * gram[:, 0, 4] + gram[:, 4, 4]
+    fits["trained"] = {"error": trained.clamp_min(0)}
+    return fits, yy
+
+
+def short(x):
+    return float(f"{x:.6g}")
+
+
+def thesis_results(acc, cfg, label, stage, checkpoint, sequences, length):
+    names = bucket_names(length)
+    spans = bounds(length)
+    head = {"label": f"{label}, {stage.replace('stage', 'stage ')}",
+            "stage": stage, "config": cfg.name,
+            "backend": cfg.lizard.backend, "torch_dtype": cfg.dtype,
+            "checkpoint": {"path": str(checkpoint)},
+            "data": {"split": "held-out", "batches": sequences,
+                     "tokens": sequences * length, "sequence_length": length,
+                     "all_batches": True}}
+    layer_mse, position, fits = [], [], []
+    for i, a in enumerate(acc):
+        err, tsq = a["head_err"], a["head_tsq"]
+        heads_n = err.shape[1]
+        size = torch.tensor([hi - lo for lo, hi in spans], dtype=torch.float64)
+        dim = a["head_dim"]
+        count = size * dim * sequences
+        buckets = []
+        for b, (lo, hi) in enumerate(spans):
+            mse = err[b].sum().item() / (count[b].item() * heads_n)
+            tms = tsq[b].sum().item() / (count[b].item() * heads_n)
+            buckets.append({"start": lo, "end": hi, "mse": mse,
+                            "target_mean_square": tms,
+                            "relative_mse": mse / tms,
+                            "mse_per_head": (err[b] / count[b]).tolist()})
+        total = count.sum().item()
+        mse = err.sum().item() / (total * heads_n)
+        tms = tsq.sum().item() / (total * heads_n)
+        layer = {"layer": i, "mse": mse, "target_mean_square": tms,
+                 "relative_mse": mse / tms,
+                 "mse_per_head": (err.sum(0) / total).tolist()}
+        layer_mse.append(layer)
+        position.append({**layer, "buckets": buckets})
+        grams = torch.cat([a["grams"], a["grams"].sum(0, keepdim=True)])
+        layer_fits = {}
+        for name, gram in zip(names, grams):
+            solved, yy = solve(gram)
+            layer_fits[name] = {
+                s: {"relative_error": (f["error"].sum() / yy.sum()).item(),
+                    "per_head": [short(e) for e in (f["error"] / yy).tolist()],
+                    **({"weights": [[short(c) for c in row]
+                                    for row in f["weights"].tolist()]}
+                       if "weights" in f else {})}
+                for s, f in solved.items()}
+        fits.append({"layer": i, "alpha": [short(a["alpha"])] * heads_n,
+                     "check_relative_error": a["check"] / sequences,
+                     "fits": layer_fits})
+    factor = cfg.mse_factor
+    loss = factor * sum(l["mse"] for l in layer_mse) / len(layer_mse)
+    summary = [{"start": lo, "end": hi,
+                "loss": factor * sum(p["buckets"][b]["mse"] for p in position)
+                / len(position),
+                "relative_mse": sum(p["buckets"][b]["relative_mse"]
+                                    for p in position) / len(position)}
+               for b, (lo, hi) in enumerate(spans)]
+    columns = list(SETS) + ["trained"]
+    return {
+        "xai-layer-wise-mse": {**head, "mse_factor": factor, "loss": loss,
+                               "stored_loss": None, "layers": layer_mse},
+        "xai-position-mse": {**head, "mse_factor": factor, "loss": loss,
+                             "stored_loss": None, "buckets": summary,
+                             "layers": position},
+        "xai-branch-fit": {
+            **head, "candidates": CANDIDATES, "buckets": names,
+            "summary": {n: {c: sum(f["fits"][n][c]["relative_error"]
+                                   for f in fits) / len(fits)
+                            for c in columns} for n in names},
+            "max_check_relative_error": max(f["check_relative_error"]
+                                            for f in fits),
+            "layers": fits}}
 
 
 def curves(runs, out, project):
@@ -359,6 +506,37 @@ def plot_maps(plt, results, out):
     save(fig, out, "attention_maps")
 
 
+def plot_branch_fit(plt, paths, out):
+    from matplotlib.colors import LogNorm
+    found = [Path(p).parent / "thesis" / "xai-branch-fit" / Path(p).name
+             for p in paths]
+    found = [json.loads(f.read_text()) for f in found if f.exists()]
+    if not found:
+        return
+    sets = ["G", "W", "WR", "G+W", "G+WR", "trained"]
+    bucket = found[0]["buckets"][0]
+    norm = LogNorm(vmin=1e-3, vmax=1.0, clip=True)
+    fig, axes = plt.subplots(1, len(found), figsize=(3.4 * len(found), 5.2),
+                             squeeze=False, facecolor="#fcfcfb")
+    for ax, d in zip(axes[0], found):
+        m = [[layer["fits"][bucket][s]["relative_error"] for s in sets]
+             for layer in d["layers"]]
+        ax.imshow(m, cmap="Blues", norm=norm, aspect="auto")
+        for i, row in enumerate(m):
+            for j, v in enumerate(row):
+                ax.text(j, i, f"{v:.2g}" if v >= 1e-3 else "<.001",
+                        ha="center", va="center", fontsize=6,
+                        color="white" if norm(v) > 0.55 else INK)
+        ax.set_xticks(range(len(sets)), sets, fontsize=8)
+        ax.set_yticks(range(len(m)))
+        ax.tick_params(length=0, labelsize=7, colors=MUTED)
+        ax.set_title(d["label"], color=INK, fontsize=10)
+    axes[0][0].set_ylabel("Layer", color=MUTED)
+    fig.suptitle(f"Branch fit at query positions {bucket}: remaining error "
+                 "/ ||y||²", color=INK, fontsize=11)
+    save(fig, out, "branch_fit")
+
+
 def plot_eval(plt, evals, out):
     from evaluate import PAPER
     series = [("Teacher", evals.get("Teacher"))]
@@ -482,6 +660,7 @@ def plot(paths, evals, curve_path, out):
                    "gate_memory")
     plot_maps(plt, [r for r in results if r["stage"] == results[-1]["stage"]],
               out)
+    plot_branch_fit(plt, sorted(paths), out)
     scores = {}
     for spec in evals:
         label, path = spec.split("=", 1)
@@ -513,7 +692,7 @@ if __name__ == "__main__":
     c.add_argument("--label", required=True, choices=["PyTorch", "Triton"])
     c.add_argument("--stage", required=True, choices=["stage1", "stage2"])
     c.add_argument("--out", required=True, type=Path)
-    c.add_argument("--sequences", type=int, default=4)
+    c.add_argument("--sequences", type=int, default=16)
     c.add_argument("--maps", nargs="*", default=["2:0", "8:5", "15:14"],
                    help="layer:head pairs for the attention maps")
     w = sub.add_parser("curves", help="training losses from wandb")
